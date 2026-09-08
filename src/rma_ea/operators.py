@@ -7,9 +7,9 @@ Implements:
 4. Midpoint bound repair.
 """
 
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
 import numpy as np
-from rma_ea.manifold import sample_geodesic_perturbation, project_to_eigen_basis, reproject_from_eigen_basis
+from .manifold import sample_geodesic_perturbation, project_to_eigen_basis, reproject_from_eigen_basis
 
 
 def repair_bounds(
@@ -144,19 +144,30 @@ class DualChannelMutation:
         
         for i in range(n_pop):
             # Select p-best individual
-            pbest_idx = rng.choice(pbest_indices)
+            if hasattr(pbest_indices, '__len__') and len(pbest_indices) == n_pop and isinstance(pbest_indices[0], (int, np.integer)):
+                pbest_idx = pbest_indices[i]
+            elif hasattr(pbest_indices, '__len__') and len(pbest_indices) > 0:
+                pbest_idx = rng.choice(pbest_indices)
+            else:
+                pbest_idx = rng.integers(0, max(2, int(0.1 * n_pop)))
             x_pbest = pop[pbest_idx]
             
             # Select r1 from pop != i
-            r1_choices = [idx for idx in range(n_pop) if idx != i]
-            r1 = rng.choice(r1_choices)
+            r1 = rng.integers(0, n_pop - 1)
+            if r1 >= i:
+                r1 += 1
             x_r1 = pop[r1]
             
             # Select r2 from union_pool != r1 and != i
-            r2_choices = [idx for idx in range(n_union) if idx != i and idx != r1]
-            if len(r2_choices) == 0:
-                r2_choices = [idx for idx in range(n_union) if idx != i]
-            r2 = rng.choice(r2_choices)
+            if n_union > 2:
+                while True:
+                    r2 = rng.integers(0, n_union)
+                    if r2 != i and r2 != r1:
+                        break
+            elif n_union == 2:
+                r2 = 1 if (i == 0 or r1 == 0) else 0
+            else:
+                r2 = 0
             x_r2 = union_pool[r2]
             
             f_i = F[i]
@@ -167,10 +178,8 @@ class DualChannelMutation:
             # Dynamic Channel decision
             if rng.random() < channel_prob:
                 # Channel A: Exploration along geodesic with asymptotic decay
-                pert = 0.05 * f_i * decay_factor * geodesic_pert[i]
-                cauchy = 0.02 * f_i * decay_factor * rng.standard_cauchy(dim)
-                cauchy = np.clip(cauchy, -0.5, 0.5)
-                donor = base_diff + pert + cauchy
+                pert = 0.02 * f_i * decay_factor * geodesic_pert[i]
+                donor = base_diff + pert
             else:
                 # Channel B: Pure current-to-pbest exploitation
                 donor = base_diff
@@ -209,31 +218,44 @@ def riemannian_eigen_crossover(
     target: np.ndarray,
     donor: np.ndarray,
     Cr: np.ndarray,
-    eigen_basis: np.ndarray,
+    eigen_basis: Optional[np.ndarray],
     rot_prob: float = 0.8,
+    return_used_mask: bool = False,
     rng: Optional[np.random.Generator] = None
-) -> np.ndarray:
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """Rotation-invariant crossover performed in the Riemannian eigen-coordinate system.
     
-    Projects individuals to eigen-basis, performs crossover, then rotates back.
-    Ensures strict rotational invariance on rotated non-separable landscapes.
+    Performs per-individual adaptive operator selection: individuals selected for
+    eigen-crossover are rotated into Riemannian coordinates, while others perform
+    standard Cartesian crossover.
     """
     if rng is None:
         rng = np.random.default_rng()
         
     n_pop, dim = target.shape
+    trial = np.zeros_like(target)
     
-    if rng.random() < rot_prob and eigen_basis is not None and eigen_basis.shape == (dim, dim):
-        # Rotate into Riemannian manifold coordinates
-        target_rot = project_to_eigen_basis(target, eigen_basis)
-        donor_rot = project_to_eigen_basis(donor, eigen_basis)
-        
-        # Binomial crossover in eigen-coordinates
-        trial_rot = binomial_crossover(target_rot, donor_rot, Cr, rng=rng)
-        
-        # Reproject back to original decision space
-        trial = reproject_from_eigen_basis(trial_rot, eigen_basis)
-        return trial
+    if eigen_basis is not None and eigen_basis.shape == (dim, dim) and rot_prob > 0.0:
+        use_rot = rng.random(n_pop) < rot_prob
     else:
-        # Standard Cartesian crossover
-        return binomial_crossover(target, donor, Cr, rng=rng)
+        use_rot = np.zeros(n_pop, dtype=bool)
+        
+    # Cartesian crossover for non-rotated individuals
+    idx_cart = np.where(~use_rot)[0]
+    if len(idx_cart) > 0:
+        trial[idx_cart] = binomial_crossover(target[idx_cart], donor[idx_cart], Cr[idx_cart], rng=rng)
+        
+    # Eigen crossover for rotated individuals
+    idx_rot = np.where(use_rot)[0]
+    if len(idx_rot) > 0:
+        target_sub = target[idx_rot]
+        donor_sub = donor[idx_rot]
+        target_rot = project_to_eigen_basis(target_sub, eigen_basis)
+        donor_rot = project_to_eigen_basis(donor_sub, eigen_basis)
+        
+        trial_rot = binomial_crossover(target_rot, donor_rot, Cr[idx_rot], rng=rng)
+        trial[idx_rot] = reproject_from_eigen_basis(trial_rot, eigen_basis)
+        
+    if return_used_mask:
+        return trial, use_rot
+    return trial

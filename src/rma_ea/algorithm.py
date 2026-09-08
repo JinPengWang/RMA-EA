@@ -12,9 +12,9 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Union
 import numpy as np
 
-from rma_ea.manifold import low_rank_covariance_decompose, symmetrize
-from rma_ea.landscape import PassiveLandscapeSensor
-from rma_ea.operators import (
+from .manifold import low_rank_covariance_decompose, symmetrize
+from .landscape import PassiveLandscapeSensor
+from .operators import (
     ParameterMemory,
     DualChannelMutation,
     riemannian_eigen_crossover,
@@ -96,6 +96,11 @@ class RMA_EA:
         self.mutator = DualChannelMutation(dim=self.dim)
         self.sensor = PassiveLandscapeSensor(dim=self.dim)
         
+        # Adaptive operator selection and local intensification
+        self.p_eigen = 0.3
+        self.aos_alpha = 0.15
+        self.rmli_active = True
+        
     def optimize(self) -> OptimizationResult:
         """Run full RMA-EA optimization loop until max_fes is reached."""
         fes = 0
@@ -121,9 +126,11 @@ class RMA_EA:
         history_pop_size = [current_pop_size]
         
         prev_success_rate = 0.2
+        generation = 0
         
         # Generation loop
         while fes < self.max_fes:
+            generation += 1
             # Sort population by fitness
             sort_indices = np.argsort(fitness)
             pop = pop[sort_indices]
@@ -134,16 +141,16 @@ class RMA_EA:
                 global_best_x = pop[0].copy()
                 
             # Elite individuals for covariance decomposition
-            n_pbest = max(2, int(np.ceil(self.p_best_rate * current_pop_size)))
-            pbest_indices = np.arange(n_pbest)
-            elite_samples = pop[pbest_indices]
+            n_cov = max(min(current_pop_size, self.dim + 2), int(0.3 * current_pop_size))
+            cov_indices = np.arange(n_cov)
+            elite_samples = pop[cov_indices]
             
             fes_ratio = fes / float(self.max_fes)
             decay_factor = float((1.0 - fes_ratio)**2)
             
             # 1. Riemannian Manifold Covariance Decomposition
             if self.manifold_active:
-                weights = np.log(n_pbest + 0.5) - np.log(np.arange(1, n_pbest + 1))
+                weights = np.log(n_cov + 0.5) - np.log(np.arange(1, n_cov + 1))
                 weights /= np.sum(weights)
                 
                 # Truncated low-rank for perturbations
@@ -166,22 +173,23 @@ class RMA_EA:
                 eigen_basis = np.eye(self.dim)
                 full_vals = np.ones(self.dim)
                 
-            # 2. Passive Zero-Cost Landscape Sensing (Zero FES overhead!)
+            # 2. Passive Zero-Cost Landscape Sensing
             if self.landscape_active:
                 channel_prob = self.sensor.update(
                     eig_vals=full_vals,
                     success_rate=prev_success_rate,
                     fes_ratio=fes_ratio
                 )
-                rot_prob = self.sensor.get_eigen_crossover_probability()
             else:
                 channel_prob = 0.5
-                rot_prob = 0.0  # pure Cartesian when deactivated
                 
             # 3. Sample adaptive parameters F and Cr
             F, Cr = self.memory.sample_parameters(size=current_pop_size, rng=self.rng)
             
-            # 4. Dual-Channel Mutation
+            # 4. pbest selection
+            pbest_num = max(2, int(np.ceil(self.p_best_rate * current_pop_size)))
+            pbest_indices = [self.rng.integers(0, pbest_num) for _ in range(current_pop_size)]
+            
             donors = self.mutator.mutate(
                 pop=pop,
                 fitness=fitness,
@@ -196,26 +204,22 @@ class RMA_EA:
                 rng=self.rng
             )
             
-            # 5. Riemannian Rotation-Invariant Crossover
-            if self.manifold_active:
-                trials = riemannian_eigen_crossover(
-                    target=pop,
-                    donor=donors,
-                    Cr=Cr,
-                    eigen_basis=eigen_basis,
-                    rot_prob=rot_prob,
-                    rng=self.rng
-                )
+            # 5. Success-History Adaptive Operator Selection (SH-AOS) Crossover with Dimension & Condition Gating
+            if self.manifold_active and self.dim <= 10:
+                log_cond = np.log10(full_vals[0] / full_vals[-1])
+                rot_prob = 0.0 if log_cond > 3.5 else self.p_eigen
             else:
-                # Cartesian fallback
-                trials = riemannian_eigen_crossover(
-                    target=pop,
-                    donor=donors,
-                    Cr=Cr,
-                    eigen_basis=None,
-                    rot_prob=0.0,
-                    rng=self.rng
-                )
+                rot_prob = 0.0
+                
+            trials, used_eigen = riemannian_eigen_crossover(
+                target=pop,
+                donor=donors,
+                Cr=Cr,
+                eigen_basis=eigen_basis if self.manifold_active else None,
+                rot_prob=rot_prob,
+                return_used_mask=True,
+                rng=self.rng
+            )
                 
             # 6. Midpoint Bound Repair
             trials = repair_bounds(trials, pop, self.lower, self.upper)
@@ -228,9 +232,11 @@ class RMA_EA:
                 fitness_eval = fitness[:eval_size]
                 F = F[:eval_size]
                 Cr = Cr[:eval_size]
+                used_eigen_eval = used_eigen[:eval_size]
             else:
                 pop_eval = pop
                 fitness_eval = fitness
+                used_eigen_eval = used_eigen
                 
             trial_fitness = self.func(trials)
             fes += eval_size
@@ -254,6 +260,16 @@ class RMA_EA:
                 if len(archive) > max_archive_size:
                     rand_perm = self.rng.permutation(len(archive))[:max_archive_size]
                     archive = archive[rand_perm]
+                    
+                # Update SH-AOS probability if eigen-crossover was active
+                if rot_prob > 0.0:
+                    diff_f = fitness_eval[improved_mask] - trial_fitness[improved_mask]
+                    imp_eigen = np.sum(diff_f[used_eigen_eval[improved_mask]]) if np.any(used_eigen_eval[improved_mask]) else 0.0
+                    imp_cart = np.sum(diff_f[~used_eigen_eval[improved_mask]]) if np.any(~used_eigen_eval[improved_mask]) else 0.0
+                    total_imp = imp_eigen + imp_cart
+                    if total_imp > 0:
+                        target_p = imp_eigen / total_imp
+                        self.p_eigen = float(np.clip((1.0 - self.aos_alpha) * self.p_eigen + self.aos_alpha * target_p, 0.05, 0.95))
                     
             pop_eval[accept_mask] = trials[accept_mask]
             fitness_eval[accept_mask] = trial_fitness[accept_mask]
@@ -280,6 +296,28 @@ class RMA_EA:
                 pop = pop[sort_idx[:target_pop_size]]
                 fitness = fitness[sort_idx[:target_pop_size]]
                 current_pop_size = target_pop_size
+                
+            # 11. Riemannian Manifold Local Intensification (RMLI)
+            if self.rmli_active and self.manifold_active and fes_ratio > 0.85 and generation % 10 == 0 and fes + 2 <= self.max_fes:
+                v_1 = eigen_basis[:, 0]
+                delta_step = max(1e-5, float(np.sqrt(full_vals[0]) * 0.05))
+                x_b = pop[0].copy()
+                f_b = float(fitness[0])
+                x_p = np.clip(x_b + delta_step * v_1, self.lower, self.upper)
+                x_m = np.clip(x_b - delta_step * v_1, self.lower, self.upper)
+                f_p = float(self.func(x_p[np.newaxis, :])[0])
+                f_m = float(self.func(x_m[np.newaxis, :])[0])
+                fes += 2
+                denom = 2.0 * (f_p - 2.0 * f_b + f_m)
+                if denom > 1e-14:
+                    step_opt = -(f_p - f_m) * delta_step / denom
+                    x_opt = np.clip(x_b + step_opt * v_1, self.lower, self.upper)
+                    if fes < self.max_fes:
+                        f_opt = float(self.func(x_opt[np.newaxis, :])[0])
+                        fes += 1
+                        if f_opt < f_b:
+                            pop[0] = x_opt
+                            fitness[0] = f_opt
                 
             cur_best = float(np.min(fitness))
             if cur_best < global_best_f:

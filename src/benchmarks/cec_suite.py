@@ -6,7 +6,7 @@ Hybrid, and Composition categories for testing Evolutionary Algorithms.
 
 from typing import List, Tuple
 import numpy as np
-from benchmarks.base import BenchmarkFunction
+from .base import BenchmarkFunction
 
 
 def generate_orthogonal_matrix(dim: int, seed: int) -> np.ndarray:

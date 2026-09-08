@@ -157,10 +157,7 @@ def sample_geodesic_perturbation(
     principal_scaled = z_principal * np.sqrt(eig_vals)  # (size, k)
     delta_principal = principal_scaled @ eig_vecs.T    # (size, dim)
     
-    # Residual isotropic exploration
-    delta_residual = rng.standard_normal((size, dim)) * sigma_res
-    
-    return delta_principal + delta_residual
+    return delta_principal
 
 
 def project_to_eigen_basis(X: np.ndarray, B: np.ndarray) -> np.ndarray:
