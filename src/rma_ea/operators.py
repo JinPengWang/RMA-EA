@@ -1,12 +1,15 @@
-"""Evolutionary Operators and Adaptive Parameter Memory for RMA-EA.
+"""Evolutionary Operators and Adaptive Parameter Memory for RMA-EA (Version 2.0).
 
-Implements dual-channel geodesic mutation, binomial crossover, parameter memory (SHADE-style
-Lehmer updates), and bound repair.
+Implements:
+1. Dual-channel geodesic mutation with asymptotic decay.
+2. Riemannian Eigen-Coordinate Crossover (rotation-invariant).
+3. Parameter Memory with Lehmer updates.
+4. Midpoint bound repair.
 """
 
 from typing import Tuple, Optional
 import numpy as np
-from rma_ea.manifold import sample_geodesic_perturbation
+from rma_ea.manifold import sample_geodesic_perturbation, project_to_eigen_basis, reproject_from_eigen_basis
 
 
 def repair_bounds(
@@ -15,21 +18,15 @@ def repair_bounds(
     lower: np.ndarray,
     upper: np.ndarray
 ) -> np.ndarray:
-    """Repair out-of-bound variables using midpoint projection to avoid edge accumulation.
+    """Repair out-of-bound variables using midpoint projection to prevent edge stagnation.
     
     If x_j < lower_j: x_j = (target_j + lower_j) / 2
     If x_j > upper_j: x_j = (target_j + upper_j) / 2
     """
     repaired = x.copy()
+    lower_b = lower[np.newaxis, :] if lower.ndim == 1 and repaired.ndim == 2 else lower
+    upper_b = upper[np.newaxis, :] if upper.ndim == 1 and repaired.ndim == 2 else upper
     
-    # Broadcast lower and upper if necessary
-    if lower.ndim == 1 and repaired.ndim == 2:
-        lower_b = lower[np.newaxis, :]
-        upper_b = upper[np.newaxis, :]
-    else:
-        lower_b = lower
-        upper_b = upper
-        
     mask_low = repaired < lower_b
     mask_high = repaired > upper_b
     
@@ -40,12 +37,9 @@ def repair_bounds(
 
 
 class ParameterMemory:
-    """Historical parameter memory for adaptive scale factor F and crossover rate Cr.
+    """Historical parameter memory for scale factor F and crossover rate Cr."""
     
-    Updates memory slots via successful Lehmer mean for F and weighted arithmetic mean for Cr.
-    """
-    
-    def __init__(self, memory_size: int = 20, init_F: float = 0.5, init_Cr: float = 0.5):
+    def __init__(self, memory_size: int = 15, init_F: float = 0.5, init_Cr: float = 0.5):
         self.memory_size = memory_size
         self.M_F = np.full(memory_size, init_F, dtype=np.float64)
         self.M_Cr = np.full(memory_size, init_Cr, dtype=np.float64)
@@ -56,7 +50,7 @@ class ParameterMemory:
         size: int,
         rng: Optional[np.random.Generator] = None
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Sample F from Cauchy and Cr from Gaussian around historical memory values."""
+        """Sample F from Cauchy and Cr from Gaussian around memory locations."""
         if rng is None:
             rng = np.random.default_rng()
             
@@ -66,7 +60,6 @@ class ParameterMemory:
         sampled_F = np.zeros(size, dtype=np.float64)
         for i in range(size):
             while True:
-                # Cauchy random variable: loc + scale * standard_cauchy
                 f_val = self.M_F[r_indices[i]] + 0.1 * rng.standard_cauchy()
                 if f_val > 1.0:
                     sampled_F[i] = 1.0
@@ -87,7 +80,7 @@ class ParameterMemory:
         successful_Cr: np.ndarray,
         fitness_improvements: np.ndarray
     ) -> None:
-        """Update memory slots using Lehmer mean for F and weighted arithmetic mean for Cr."""
+        """Update memory slots using Lehmer mean for F and weighted mean for Cr."""
         if len(successful_F) == 0:
             return
             
@@ -102,22 +95,16 @@ class ParameterMemory:
         sum_w_f = np.sum(weights * successful_F)
         mean_L_F = sum_w_f2 / max(sum_w_f, 1e-12)
         
-        # Weighted arithmetic mean for Cr
+        # Weighted mean for Cr
         mean_A_Cr = np.sum(weights * successful_Cr)
         
-        # Store in current memory slot and increment pointer
         self.M_F[self.memory_ptr] = float(np.clip(mean_L_F, 0.01, 1.0))
         self.M_Cr[self.memory_ptr] = float(np.clip(mean_A_Cr, 0.0, 1.0))
-        
         self.memory_ptr = (self.memory_ptr + 1) % self.memory_size
 
 
 class DualChannelMutation:
-    """Dual-channel mutation operator arbitrating between exploration and exploitation.
-    
-    Channel A: Geodesic Drift Exploration (heavy-tailed manifold traversal)
-    Channel B: Riemannian Anisotropic Contraction (tight refinement along curvature)
-    """
+    """Dual-channel mutation with manifold alignment and asymptotic decay."""
     
     def __init__(self, dim: int):
         self.dim = dim
@@ -127,30 +114,31 @@ class DualChannelMutation:
         pop: np.ndarray,
         fitness: np.ndarray,
         pbest_indices: np.ndarray,
-        archive: np.ndarray,
+        archive: Optional[np.ndarray],
         F: np.ndarray,
         channel_prob: float,
         eig_vecs: np.ndarray,
         eig_vals: np.ndarray,
         sigma_res: float,
+        decay_factor: float = 1.0,
         rng: Optional[np.random.Generator] = None
     ) -> np.ndarray:
-        """Generate donor vectors for the entire population."""
+        """Generate donor vectors via current-to-pbest/1 with manifold guidance."""
         if rng is None:
             rng = np.random.default_rng()
             
         n_pop, dim = pop.shape
         donors = np.zeros_like(pop)
         
-        # Candidate pool for r2: current population + external archive
+        # Archive pool
         if archive is not None and len(archive) > 0:
             union_pool = np.vstack([pop, archive])
         else:
             union_pool = pop
         n_union = len(union_pool)
         
-        # Sample perturbations for exploration and exploitation channels
-        geodesic_perturbations = sample_geodesic_perturbation(
+        # Sample geodesic perturbation along manifold directions
+        geodesic_pert = sample_geodesic_perturbation(
             eig_vecs, eig_vals, sigma_res, size=n_pop, rng=rng
         )
         
@@ -173,27 +161,19 @@ class DualChannelMutation:
             
             f_i = F[i]
             
-            # Dynamic Channel Decision: Exploration vs Exploitation
+            # Core current-to-pbest direction
+            base_diff = pop[i] + f_i * (x_pbest - pop[i]) + f_i * (x_r1 - x_r2)
+            
+            # Dynamic Channel decision
             if rng.random() < channel_prob:
-                # Channel A: Geodesic Drift Exploration
-                # current-to-pbest + difference vector + manifold geodesic perturbation
-                cauchy_noise = 0.05 * f_i * rng.standard_cauchy(dim)
-                cauchy_noise = np.clip(cauchy_noise, -1.0, 1.0)
-                donor = (
-                    pop[i] + 
-                    f_i * (x_pbest - pop[i]) + 
-                    f_i * (x_r1 - x_r2) + 
-                    0.2 * f_i * geodesic_perturbations[i] + 
-                    cauchy_noise
-                )
+                # Channel A: Exploration along geodesic with asymptotic decay
+                pert = 0.05 * f_i * decay_factor * geodesic_pert[i]
+                cauchy = 0.02 * f_i * decay_factor * rng.standard_cauchy(dim)
+                cauchy = np.clip(cauchy, -0.5, 0.5)
+                donor = base_diff + pert + cauchy
             else:
-                # Channel B: Riemannian Anisotropic Contraction Exploitation
-                # pbest-centered contraction along principal covariance axes
-                donor = (
-                    x_pbest + 
-                    f_i * (x_r1 - x_r2) + 
-                    0.05 * f_i * geodesic_perturbations[i]
-                )
+                # Channel B: Pure current-to-pbest exploitation
+                donor = base_diff
                 
             donors[i] = donor
             
@@ -206,7 +186,7 @@ def binomial_crossover(
     Cr: np.ndarray,
     rng: Optional[np.random.Generator] = None
 ) -> np.ndarray:
-    """Binomial crossover ensuring at least one component from donor."""
+    """Standard Cartesian binomial crossover."""
     if rng is None:
         rng = np.random.default_rng()
         
@@ -216,10 +196,44 @@ def binomial_crossover(
     rand_matrix = rng.random((n_pop, dim))
     mask = rand_matrix <= Cr[:, np.newaxis]
     
-    # Ensure at least one dimension is inherited from donor
+    # Guarantee at least 1 donor dimension
     j_rand = rng.integers(0, dim, size=n_pop)
     for i in range(n_pop):
         mask[i, j_rand[i]] = True
         
     trial[mask] = donor[mask]
     return trial
+
+
+def riemannian_eigen_crossover(
+    target: np.ndarray,
+    donor: np.ndarray,
+    Cr: np.ndarray,
+    eigen_basis: np.ndarray,
+    rot_prob: float = 0.8,
+    rng: Optional[np.random.Generator] = None
+) -> np.ndarray:
+    """Rotation-invariant crossover performed in the Riemannian eigen-coordinate system.
+    
+    Projects individuals to eigen-basis, performs crossover, then rotates back.
+    Ensures strict rotational invariance on rotated non-separable landscapes.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+        
+    n_pop, dim = target.shape
+    
+    if rng.random() < rot_prob and eigen_basis is not None and eigen_basis.shape == (dim, dim):
+        # Rotate into Riemannian manifold coordinates
+        target_rot = project_to_eigen_basis(target, eigen_basis)
+        donor_rot = project_to_eigen_basis(donor, eigen_basis)
+        
+        # Binomial crossover in eigen-coordinates
+        trial_rot = binomial_crossover(target_rot, donor_rot, Cr, rng=rng)
+        
+        # Reproject back to original decision space
+        trial = reproject_from_eigen_basis(trial_rot, eigen_basis)
+        return trial
+    else:
+        # Standard Cartesian crossover
+        return binomial_crossover(target, donor, Cr, rng=rng)

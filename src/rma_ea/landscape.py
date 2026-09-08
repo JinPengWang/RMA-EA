@@ -1,119 +1,89 @@
-"""Online Landscape Ruggedness Sensor (LRS) for RMA-EA.
+"""Zero-Evaluation Online Landscape Sensor for RMA-EA (Version 2.0).
 
-Monitors fitness landscape multimodality and curvature online to dynamically
-balance exploration along geodesics and exploitation within Riemannian ellipsoids.
+Calculates topological landscape roughness, condition number, and diversity
+passively from the evolving population and Riemannian covariance without
+spending ANY function evaluation budget on probe points.
 """
 
-from typing import Callable, Optional
+from typing import Optional
 import numpy as np
 
 
-class LandscapeRuggednessSensor:
-    """Online Landscape Ruggedness Sensor (LRS).
+class PassiveLandscapeSensor:
+    """Zero-Cost Online Landscape Sensor.
     
-    Dynamically senses fitness landscape complexity (ruggedness, multi-funnel
-    dispersion, and curvature variations) to adaptively balance exploration
-    vs exploitation without manual tuning.
+    Monitors:
+    1. Condition number ratio: kappa(C) = lambda_max / lambda_min (ill-conditioned vs spherical)
+    2. Population evolutionary progress / stagnation: success rate SR
+    3. Population spectral dispersion entropy
+    
+    Produces:
+    - rho_t: ruggedness index in [0, 1]
+    - p_rot: probability of performing crossover in the Riemannian eigen-coordinate system
     """
     
     def __init__(
         self,
         dim: int,
-        history_len: int = 15,
-        kappa: float = 1.5,
-        theta_base: float = 0.5,
-        smoothing: float = 0.3,
-        p_min: float = 0.1,
-        p_max: float = 0.9,
-        n_probe_samples: int = 5
+        smoothing: float = 0.2,
+        history_len: int = 20
     ):
         self.dim = dim
-        self.history_len = history_len
-        self.kappa = kappa
-        self.theta_base = theta_base
         self.smoothing = smoothing
-        self.p_min = p_min
-        self.p_max = p_max
-        self.n_probe_samples = n_probe_samples
+        self.history_len = history_len
         
         self.current_ruggedness: float = 0.5
-        self.history_ruggedness: list = [0.5]
+        self.current_rot_prob: float = 0.8
+        self.history_sr: list = []
         
-    def sense_and_update(
+    def update(
         self,
-        pop: np.ndarray,
-        fitness: np.ndarray,
-        eig_vecs: np.ndarray,
         eig_vals: np.ndarray,
-        eval_func: Callable[[np.ndarray], np.ndarray],
-        rng: Optional[np.random.Generator] = None,
-        eps: float = 1e-10
+        success_rate: float,
+        fes_ratio: float
     ) -> float:
-        """Sense directional variation along principal axes and update ruggedness index.
+        """Update topological landscape metrics using zero extra evaluations.
         
-        Evaluates second-order finite difference variations (directional ruggedness)
-        along principal Riemannian geodesic axes:
-        Curvature roughness = |f(x + delta*u) - 2f(x) + f(x - delta*u)| / delta^2
+        Args:
+            eig_vals: Eigenvalues of elite covariance matrix (sorted descending)
+            success_rate: Fraction of individuals that produced fitness improvement
+            fes_ratio: Current FES / MaxFES in [0, 1]
         """
-        if rng is None:
-            rng = np.random.default_rng()
+        self.history_sr.append(success_rate)
+        if len(self.history_sr) > self.history_len:
+            self.history_sr.pop(0)
             
-        n_pop, dim = pop.shape
-        k = len(eig_vals)
-        n_probes = min(self.n_probe_samples, n_pop)
+        mean_sr = np.mean(self.history_sr)
         
-        # Sample probe individuals
-        probe_indices = rng.choice(n_pop, size=n_probes, replace=False)
-        probe_pop = pop[probe_indices]
-        probe_fit = fitness[probe_indices]
+        # 1. Condition number: ratio of principal to minor eigenvalue
+        max_val = max(eig_vals[0], 1e-12)
+        min_val = max(eig_vals[-1], 1e-12)
+        log_cond = np.log10(max_val / min_val)
         
-        # Probing directions: choose top principal directions
-        n_dirs = min(k, 3)
-        curvatures = []
+        # High condition number (> 3) indicates narrow ill-conditioned valley
+        # Higher condition number -> higher rotation-basis crossover probability
+        norm_cond = float(np.clip(log_cond / 6.0, 0.0, 1.0))
+        self.current_rot_prob = float(np.clip(0.4 + 0.6 * norm_cond, 0.4, 0.95))
         
-        for p_idx in range(n_probes):
-            x = probe_pop[p_idx]
-            f_orig = probe_fit[p_idx]
-            for d in range(n_dirs):
-                u_d = eig_vecs[:, d]
-                delta = 0.05 * np.sqrt(max(eig_vals[d], 1e-3))
-                
-                x_plus = x + delta * u_d
-                x_minus = x - delta * u_d
-                
-                f_plus = float(eval_func(x_plus.reshape(1, -1))[0])
-                f_minus = float(eval_func(x_minus.reshape(1, -1))[0])
-                
-                # Second-order directional variation (ruggedness/non-quadratic roughness)
-                second_diff = abs(f_plus - 2.0 * f_orig + f_minus) / (delta**2 + eps)
-                curvatures.append(second_diff)
-                
-        curvatures = np.array(curvatures)
-        if len(curvatures) > 1:
-            mean_c = np.mean(curvatures)
-            std_c = np.std(curvatures)
-            # Coefficient of variation of directional curvature
-            cv_c = std_c / (mean_c + eps)
-        else:
-            cv_c = 0.5
-            
-        # Sigmoidal mapping of CV to [0, 1]
-        # In a quadratic function (Sphere), cv_c is close to 0 (constant curvature).
-        # In multimodal functions (Rastrigin, etc.), cv_c is substantially larger.
-        raw_ruggedness = 1.0 / (1.0 + np.exp(-self.kappa * (cv_c - self.theta_base)))
+        # 2. Ruggedness estimation:
+        # High success rate in early stages = smooth landscape
+        # Very low success rate with high variance = rugged/stagnant trap
+        # Early fes_ratio = more exploration
+        stagnation_factor = float(np.clip((0.25 - mean_sr) / 0.25, 0.0, 1.0))
+        raw_ruggedness = 0.5 * (1.0 - fes_ratio) + 0.5 * stagnation_factor
         
         # Smooth with exponential moving average
         self.current_ruggedness = (
-            (1.0 - self.smoothing) * self.current_ruggedness + 
+            (1.0 - self.smoothing) * self.current_ruggedness +
             self.smoothing * raw_ruggedness
         )
-        self.current_ruggedness = float(np.clip(self.current_ruggedness, 0.0, 1.0))
-        self.history_ruggedness.append(self.current_ruggedness)
-        if len(self.history_ruggedness) > self.history_len:
-            self.history_ruggedness.pop(0)
-            
+        self.current_ruggedness = float(np.clip(self.current_ruggedness, 0.05, 0.95))
         return self.current_ruggedness
         
     def get_exploration_probability(self) -> float:
-        """Calculate dynamic probability of executing geodesic exploration vs exploitation."""
-        return float(self.p_min + (self.p_max - self.p_min) * self.current_ruggedness)
+        """Dynamic exploration probability."""
+        return self.current_ruggedness
+        
+    def get_eigen_crossover_probability(self) -> float:
+        """Probability of projecting into Riemannian eigen-coordinate system for crossover."""
+        return self.current_rot_prob

@@ -9,6 +9,7 @@ from rma_ea.operators import (
     ParameterMemory,
     DualChannelMutation,
     binomial_crossover,
+    riemannian_eigen_crossover,
     repair_bounds
 )
 
@@ -110,3 +111,20 @@ def test_dual_channel_mutation_outputs():
         rng=rng
     )
     assert donors_expt.shape == (n_pop, dim)
+
+
+def test_riemannian_eigen_crossover():
+    dim = 6
+    n_pop = 20
+    rng = np.random.default_rng(999)
+    target = rng.standard_normal((n_pop, dim))
+    donor = rng.standard_normal((n_pop, dim))
+    Cr = np.full(n_pop, 0.7)
+    
+    # Orthonormal basis
+    eigen_basis, _ = np.linalg.qr(rng.standard_normal((dim, dim)))
+    
+    trial = riemannian_eigen_crossover(target, donor, Cr, eigen_basis=eigen_basis, rot_prob=1.0, rng=rng)
+    assert trial.shape == (n_pop, dim)
+    assert not np.array_equal(trial, target)
+    assert not np.array_equal(trial, donor)

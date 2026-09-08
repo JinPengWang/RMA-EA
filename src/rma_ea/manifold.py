@@ -161,3 +161,19 @@ def sample_geodesic_perturbation(
     delta_residual = rng.standard_normal((size, dim)) * sigma_res
     
     return delta_principal + delta_residual
+
+
+def project_to_eigen_basis(X: np.ndarray, B: np.ndarray) -> np.ndarray:
+    """Project points from Cartesian coordinates to Riemannian eigen-basis.
+    
+    Y = X @ B
+    """
+    return X @ B
+
+
+def reproject_from_eigen_basis(Y: np.ndarray, B: np.ndarray) -> np.ndarray:
+    """Reproject points from Riemannian eigen-basis back to Cartesian coordinates.
+    
+    X = Y @ B.T
+    """
+    return Y @ B.T
