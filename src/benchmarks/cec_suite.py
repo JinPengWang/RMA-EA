@@ -144,17 +144,22 @@ def raw_composition_1(z: np.ndarray) -> np.ndarray:
         weights[:, 2] * (f3 + biases[2])
     )
     
-    # Compute offset so value at z=0 is exactly 0
-    f1_0 = float(raw_rastrigin(np.zeros((1, dim)))[0])
-    f2_0 = float(raw_griewank(np.zeros((1, dim)) - centers[1])[0])
-    f3_0 = float(raw_schwefel(np.zeros((1, dim)) - centers[2])[0])
-    dist2_0 = np.array([[0.0, float(np.sum(centers[1]**2)), float(np.sum(centers[2]**2))]])
-    w_0 = np.zeros_like(dist2_0)
-    for i in range(n_components):
-        w_0[:, i] = np.exp(-dist2_0[:, i] / (2.0 * dim * sigmas[i]**2))
-    w_0 /= np.sum(w_0)
-    comp_0 = float(w_0[0, 0] * (f1_0 + biases[0]) + w_0[0, 1] * (f2_0 + biases[1]) + w_0[0, 2] * (f3_0 + biases[2]))
-    
+    # Compute offset so value at z=0 is exactly 0 (cached by dim)
+    global _comp_0_cache
+    if '_comp_0_cache' not in globals():
+        _comp_0_cache = {}
+    if dim not in _comp_0_cache:
+        f1_0 = float(raw_rastrigin(np.zeros((1, dim)))[0])
+        f2_0 = float(raw_griewank(np.zeros((1, dim)) - centers[1])[0])
+        f3_0 = float(raw_schwefel(np.zeros((1, dim)) - centers[2])[0])
+        dist2_0 = np.array([[0.0, float(np.sum(centers[1]**2)), float(np.sum(centers[2]**2))]])
+        w_0 = np.zeros_like(dist2_0)
+        for i in range(n_components):
+            w_0[:, i] = np.exp(-dist2_0[:, i] / (2.0 * dim * sigmas[i]**2))
+        w_0 /= np.sum(w_0)
+        _comp_0_cache[dim] = float(w_0[0, 0] * (f1_0 + biases[0]) + w_0[0, 1] * (f2_0 + biases[1]) + w_0[0, 2] * (f3_0 + biases[2]))
+        
+    comp_0 = _comp_0_cache[dim]
     return comp_val - comp_0
 
 
