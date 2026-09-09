@@ -5,7 +5,7 @@ Standard pure Python implementation of the (mu/mu_w, lambda)-CMA-ES (Hansen, 201
 
 from typing import Callable, Union, Optional
 import numpy as np
-from baselines.de import BaselineResult
+from .de import BaselineResult
 
 
 class CMAES:

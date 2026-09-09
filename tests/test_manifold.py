@@ -98,3 +98,28 @@ def test_low_rank_decompose_and_sampling():
     # Test sampling perturbation
     perturbation = sample_geodesic_perturbation(eig_vecs, eig_vals, sigma_res, size=5, rng=rng)
     assert perturbation.shape == (5, dim)
+
+
+def test_riemannian_metric_flow():
+    from rma_ea.manifold import RiemannianMetricFlow
+    dim = 8
+    flow = RiemannianMetricFlow(dim=dim)
+    
+    assert flow.C.shape == (dim, dim)
+    assert np.allclose(flow.C, np.eye(dim))
+    
+    # Update with synthetic elite samples
+    rng = np.random.default_rng(42)
+    elites = rng.standard_normal((10, dim)) * np.linspace(1, 10, dim)
+    weights = np.ones(10) / 10.0
+    
+    U, vals = flow.update(elites, weights)
+    
+    assert U.shape == (dim, dim)
+    assert vals.shape == (dim,)
+    assert np.all(vals > 0)
+    # Check orthogonality of tangent frame U: U^T U = I
+    assert np.allclose(U.T @ U, np.eye(dim), atol=1e-8)
+    # Check exact symmetry of cometric C: C = C^T
+    assert np.allclose(flow.C, flow.C.T, atol=1e-8)
+

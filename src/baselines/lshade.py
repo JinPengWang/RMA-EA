@@ -5,7 +5,7 @@ Faithful implementation of the standard L-SHADE algorithm (Tanabe & Fukunaga, CE
 
 from typing import Callable, Union, Optional
 import numpy as np
-from baselines.de import BaselineResult
+from .de import BaselineResult
 
 
 class LSHADE:

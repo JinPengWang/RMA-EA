@@ -1,23 +1,34 @@
-"""RMA-EA Core Algorithm Engine (Version 2.0 - High Performance SOTA Edition).
+"""RMA-EA Core Algorithm Engine (Version 3.0 - Riemannian Geodesic Flow Optimization).
 
-Integrates:
-1. Log-Euclidean SPD Riemannian Manifold Elite Covariance Modeling.
-2. Passive Zero-Cost Online Landscape Sensor (no FES wasted on probes).
-3. Rotation-Invariant Riemannian Eigen-Coordinate Crossover.
-4. Linear Population Size Reduction with Discarded-to-Archive Transfer.
-5. Asymptotic Geodesic Perturbation Decay.
+A mathematically unified evolutionary continuous optimizer derived from first principles
+of Riemannian Differential Geometry on the Symmetric Positive Definite (SPD) manifold S++^D.
+
+Mathematical Foundations:
+1. Continuous Riemannian Metric Flow on S++^D:
+   Maintains the cometric tensor C_t = G_t^{-1} without finite-sample rank deficiency:
+       C_{t+1} = (1 - c_c) C_t + c_c * (C_emp / (Tr(C_emp)/D))
+2. Orthonormal Tangent Space Bundle:
+   Spectral decomposition of the cometric tensor:
+       C_t = U Lambda U^T = sum_{j=1}^D lambda_j u_j u_j^T
+   spans the intrinsic principal geodesic axes of the fitness manifold.
+3. Riemannian Tangent Projection Crossover:
+   Decomposes the tangent displacement vector d = v_i - x_i onto the principal frame:
+       u_i = x_i + U [ m_i * (U^T (v_i - x_i)) ]
+   Eliminating distortion on ill-conditioned ravines while preserving rotational invariance.
+4. Tri-Parameter Joint Historical Memory:
+   Jointly adapts (F, Cr, Chart) via Lehmer and fitness-improvement weighted updating.
+5. Geodesic Linear Population Size Reduction with Discarded-to-Archive Transfer.
 """
 
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Union
 import numpy as np
 
-from .manifold import low_rank_covariance_decompose, symmetrize
+from .manifold import RiemannianMetricFlow, symmetrize
 from .landscape import PassiveLandscapeSensor
 from .operators import (
     ParameterMemory,
-    DualChannelMutation,
-    riemannian_eigen_crossover,
+    riemannian_tangent_crossover,
     repair_bounds
 )
 
@@ -35,7 +46,7 @@ class OptimizationResult:
 
 
 class RMA_EA:
-    """RMA-EA Optimizer (Version 2.0).
+    """RMA-EA Optimizer (Version 3.0 - Unified Riemannian Geodesic Flow).
     
     Parameters:
         objective_func: Objective function accepting (N, D) array and returning (N,) array.
@@ -49,7 +60,7 @@ class RMA_EA:
         arc_rate: Ratio of external archive size relative to current population (default: 1.4).
         memory_size: Size of historical parameter memory H (default: 20).
         manifold_active: Flag for ablation study (True = use Riemannian manifold).
-        landscape_active: Flag for ablation study (True = use LRS sensing).
+        landscape_active: Flag for ablation study (retained for backward compatibility).
         seed: Random seed for reproducibility.
     """
     
@@ -81,25 +92,14 @@ class RMA_EA:
         self.p_best_rate = p_best_rate
         self.arc_rate = arc_rate
         self.memory_size = memory_size
-        
-        if rank_k is None:
-            self.rank_k = max(2, min(dim, int(np.ceil(np.sqrt(dim) * 1.5))))
-        else:
-            self.rank_k = min(dim, rank_k)
-            
         self.manifold_active = manifold_active
         self.landscape_active = landscape_active
         self.rng = np.random.default_rng(seed)
         
-        # Modules
+        # Riemannian Metric Flow & Multi-Chart Memory Engine
+        self.metric_flow = RiemannianMetricFlow(dim=self.dim)
         self.memory = ParameterMemory(memory_size=self.memory_size)
-        self.mutator = DualChannelMutation(dim=self.dim)
         self.sensor = PassiveLandscapeSensor(dim=self.dim)
-        
-        # Adaptive operator selection and local intensification
-        self.p_eigen = 0.3
-        self.aos_alpha = 0.15
-        self.rmli_active = True
         
     def optimize(self) -> OptimizationResult:
         """Run full RMA-EA optimization loop until max_fes is reached."""
@@ -125,13 +125,9 @@ class RMA_EA:
         history_ruggedness = [self.sensor.current_ruggedness]
         history_pop_size = [current_pop_size]
         
-        prev_success_rate = 0.2
-        generation = 0
-        
         # Generation loop
         while fes < self.max_fes:
-            generation += 1
-            # Sort population by fitness
+            # 1. Sort population by fitness
             sort_indices = np.argsort(fitness)
             pop = pop[sort_indices]
             fitness = fitness[sort_indices]
@@ -140,104 +136,75 @@ class RMA_EA:
                 global_best_f = float(fitness[0])
                 global_best_x = pop[0].copy()
                 
-            # Elite individuals for covariance decomposition
-            n_cov = max(min(current_pop_size, self.dim + 2), int(0.3 * current_pop_size))
-            cov_indices = np.arange(n_cov)
-            elite_samples = pop[cov_indices]
+            # 2. Continuous Riemannian Metric Flow Update on S++^D
+            n_elite = max(4, int(0.2 * current_pop_size))
+            elite_samples = pop[:n_elite]
+            weights = np.log(n_elite + 0.5) - np.log(np.arange(1, n_elite + 1))
+            weights /= np.sum(weights)
             
-            fes_ratio = fes / float(self.max_fes)
-            decay_factor = float((1.0 - fes_ratio)**2)
-            
-            # 1. Riemannian Manifold Covariance Decomposition
             if self.manifold_active:
-                weights = np.log(n_cov + 0.5) - np.log(np.arange(1, n_cov + 1))
-                weights /= np.sum(weights)
-                
-                # Truncated low-rank for perturbations
-                eig_vals_k, eig_vecs_k, sigma_res = low_rank_covariance_decompose(
-                    elite_samples, weights, rank_k=self.rank_k
-                )
-                
-                # Full eigen-basis B for rotational invariance crossover
-                mean_elite = np.sum(elite_samples * weights[:, np.newaxis], axis=0)
-                diff_elite = elite_samples - mean_elite
-                cov_full = (diff_elite.T * weights) @ diff_elite + np.eye(self.dim) * 1e-12
-                all_vals, all_vecs = np.linalg.eigh(symmetrize(cov_full))
-                sort_e = np.argsort(all_vals)[::-1]
-                eigen_basis = all_vecs[:, sort_e]
-                full_vals = np.maximum(all_vals[sort_e], 1e-12)
+                eigen_basis, eig_vals = self.metric_flow.update(elite_samples, weights)
             else:
-                eig_vecs_k = np.eye(self.dim, self.rank_k)
-                eig_vals_k = np.ones(self.rank_k)
-                sigma_res = 0.5
                 eigen_basis = np.eye(self.dim)
-                full_vals = np.ones(self.dim)
+                eig_vals = np.ones(self.dim)
                 
-            # 2. Passive Zero-Cost Landscape Sensing
-            if self.landscape_active:
-                channel_prob = self.sensor.update(
-                    eig_vals=full_vals,
-                    success_rate=prev_success_rate,
-                    fes_ratio=fes_ratio
-                )
-            else:
-                channel_prob = 0.5
-                
-            # 3. Sample adaptive parameters F and Cr
-            F, Cr = self.memory.sample_parameters(size=current_pop_size, rng=self.rng)
-            
-            # 4. pbest selection
-            pbest_num = max(2, int(np.ceil(self.p_best_rate * current_pop_size)))
-            pbest_indices = [self.rng.integers(0, pbest_num) for _ in range(current_pop_size)]
-            
-            donors = self.mutator.mutate(
-                pop=pop,
-                fitness=fitness,
-                pbest_indices=pbest_indices,
-                archive=archive,
-                F=F,
-                channel_prob=channel_prob,
-                eig_vecs=eig_vecs_k,
-                eig_vals=eig_vals_k,
-                sigma_res=sigma_res,
-                decay_factor=decay_factor,
-                rng=self.rng
+            # 3. Sample Parameters & Multi-Chart Indicators from Joint Memory
+            F, Cr, use_chart, slot_indices = self.memory.sample_parameters(
+                size=current_pop_size, rng=self.rng, return_chart=True
             )
-            
-            # 5. Success-History Adaptive Operator Selection (SH-AOS) Crossover with Dimension & Condition Gating
-            if self.manifold_active and self.dim <= 10:
-                log_cond = np.log10(full_vals[0] / full_vals[-1])
-                rot_prob = 0.0 if log_cond > 3.5 else self.p_eigen
-            else:
-                rot_prob = 0.0
+            if not self.manifold_active:
+                use_chart = np.zeros(current_pop_size, dtype=bool)
                 
-            trials, used_eigen = riemannian_eigen_crossover(
+            # 4. Tangent Mutation (current-to-pbest/1 with archive)
+            union_pool = np.vstack([pop, archive]) if len(archive) > 0 else pop
+            n_union = len(union_pool)
+            
+            pbest_max = max(2, int(np.ceil(self.p_best_rate * current_pop_size)))
+            pbest_indices = self.rng.integers(0, pbest_max, size=current_pop_size)
+            
+            donors = np.zeros_like(pop)
+            for i in range(current_pop_size):
+                x_pbest = pop[pbest_indices[i]]
+                r1 = self.rng.integers(0, current_pop_size - 1)
+                if r1 >= i:
+                    r1 += 1
+                x_r1 = pop[r1]
+                
+                if n_union > 2:
+                    while True:
+                        r2 = self.rng.integers(0, n_union)
+                        if r2 != i and r2 != r1:
+                            break
+                elif n_union == 2:
+                    r2 = 1 if (i == 0 or r1 == 0) else 0
+                else:
+                    r2 = 0
+                x_r2 = union_pool[r2]
+                
+                donors[i] = pop[i] + F[i] * (x_pbest - pop[i]) + F[i] * (x_r1 - x_r2)
+                
+            # 5. Riemannian Tangent Projection Crossover
+            trials = riemannian_tangent_crossover(
                 target=pop,
                 donor=donors,
                 Cr=Cr,
-                eigen_basis=eigen_basis if self.manifold_active else None,
-                rot_prob=rot_prob,
-                return_used_mask=True,
+                eigen_basis=eigen_basis,
+                use_chart=use_chart,
                 rng=self.rng
             )
-                
-            # 6. Midpoint Bound Repair
+            
+            # 6. Bound Repair
             trials = repair_bounds(trials, pop, self.lower, self.upper)
             
             # 7. Evaluate Trial Vectors
             eval_size = min(len(trials), self.max_fes - fes)
-            if eval_size < len(trials):
-                trials = trials[:eval_size]
-                pop_eval = pop[:eval_size]
-                fitness_eval = fitness[:eval_size]
-                F = F[:eval_size]
-                Cr = Cr[:eval_size]
-                used_eigen_eval = used_eigen[:eval_size]
-            else:
-                pop_eval = pop
-                fitness_eval = fitness
-                used_eigen_eval = used_eigen
-                
+            trials = trials[:eval_size]
+            pop_eval = pop[:eval_size]
+            fitness_eval = fitness[:eval_size]
+            F_eval = F[:eval_size]
+            Cr_eval = Cr[:eval_size]
+            use_chart_eval = use_chart[:eval_size]
+            
             trial_fitness = self.func(trials)
             fes += eval_size
             
@@ -246,38 +213,30 @@ class RMA_EA:
             equal_mask = trial_fitness == fitness_eval
             accept_mask = improved_mask | equal_mask
             
-            prev_success_rate = float(np.mean(improved_mask))
-            
-            successful_F = F[improved_mask]
-            successful_Cr = Cr[improved_mask]
-            fitness_improvements = fitness_eval[improved_mask] - trial_fitness[improved_mask]
-            
-            # Update archive with superseded parents
+            # Update archive & Tri-Parameter Memory
             if np.any(improved_mask):
-                superseded_parents = pop_eval[improved_mask]
-                archive = np.vstack([archive, superseded_parents])
+                archive = np.vstack([archive, pop_eval[improved_mask]])
                 max_archive_size = int(self.arc_rate * current_pop_size)
                 if len(archive) > max_archive_size:
                     rand_perm = self.rng.permutation(len(archive))[:max_archive_size]
                     archive = archive[rand_perm]
                     
-                # Update SH-AOS probability if eigen-crossover was active
-                if rot_prob > 0.0:
-                    diff_f = fitness_eval[improved_mask] - trial_fitness[improved_mask]
-                    imp_eigen = np.sum(diff_f[used_eigen_eval[improved_mask]]) if np.any(used_eigen_eval[improved_mask]) else 0.0
-                    imp_cart = np.sum(diff_f[~used_eigen_eval[improved_mask]]) if np.any(~used_eigen_eval[improved_mask]) else 0.0
-                    total_imp = imp_eigen + imp_cart
-                    if total_imp > 0:
-                        target_p = imp_eigen / total_imp
-                        self.p_eigen = float(np.clip((1.0 - self.aos_alpha) * self.p_eigen + self.aos_alpha * target_p, 0.05, 0.95))
-                    
+                successful_F = F_eval[improved_mask]
+                successful_Cr = Cr_eval[improved_mask]
+                successful_chart = use_chart_eval[improved_mask]
+                fitness_improvements = fitness_eval[improved_mask] - trial_fitness[improved_mask]
+                
+                self.memory.update_memory(
+                    successful_F=successful_F,
+                    successful_Cr=successful_Cr,
+                    fitness_improvements=fitness_improvements,
+                    successful_chart=successful_chart
+                )
+                
             pop_eval[accept_mask] = trials[accept_mask]
             fitness_eval[accept_mask] = trial_fitness[accept_mask]
             
-            # 9. Update Parameter Memory
-            self.memory.update_memory(successful_F, successful_Cr, fitness_improvements)
-            
-            # 10. Linear Population Size Reduction (LPSR)
+            # 9. Linear Population Size Reduction (LPSR)
             target_pop_size = int(np.round(
                 ((self.pop_min - self.pop_init) / float(self.max_fes)) * fes + self.pop_init
             ))
@@ -285,7 +244,6 @@ class RMA_EA:
             
             if target_pop_size < current_pop_size:
                 sort_idx = np.argsort(fitness)
-                # Transfer pruned individuals into archive for diversity preservation
                 pruned_individuals = pop[sort_idx[target_pop_size:]]
                 archive = np.vstack([archive, pruned_individuals])
                 max_archive_size = int(self.arc_rate * target_pop_size)
@@ -297,28 +255,6 @@ class RMA_EA:
                 fitness = fitness[sort_idx[:target_pop_size]]
                 current_pop_size = target_pop_size
                 
-            # 11. Riemannian Manifold Local Intensification (RMLI)
-            if self.rmli_active and self.manifold_active and fes_ratio > 0.85 and generation % 10 == 0 and fes + 2 <= self.max_fes:
-                v_1 = eigen_basis[:, 0]
-                delta_step = max(1e-5, float(np.sqrt(full_vals[0]) * 0.05))
-                x_b = pop[0].copy()
-                f_b = float(fitness[0])
-                x_p = np.clip(x_b + delta_step * v_1, self.lower, self.upper)
-                x_m = np.clip(x_b - delta_step * v_1, self.lower, self.upper)
-                f_p = float(self.func(x_p[np.newaxis, :])[0])
-                f_m = float(self.func(x_m[np.newaxis, :])[0])
-                fes += 2
-                denom = 2.0 * (f_p - 2.0 * f_b + f_m)
-                if denom > 1e-14:
-                    step_opt = -(f_p - f_m) * delta_step / denom
-                    x_opt = np.clip(x_b + step_opt * v_1, self.lower, self.upper)
-                    if fes < self.max_fes:
-                        f_opt = float(self.func(x_opt[np.newaxis, :])[0])
-                        fes += 1
-                        if f_opt < f_b:
-                            pop[0] = x_opt
-                            fitness[0] = f_opt
-                
             cur_best = float(np.min(fitness))
             if cur_best < global_best_f:
                 global_best_f = cur_best
@@ -326,7 +262,7 @@ class RMA_EA:
                 
             history_fitness.append(global_best_f)
             history_fes.append(fes)
-            history_ruggedness.append(self.sensor.current_ruggedness)
+            history_ruggedness.append(float(np.log10(max(eig_vals[0] / eig_vals[-1], 1.0))))
             history_pop_size.append(current_pop_size)
             
         return OptimizationResult(
@@ -338,3 +274,4 @@ class RMA_EA:
             history_ruggedness=history_ruggedness,
             history_pop_size=history_pop_size
         )
+

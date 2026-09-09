@@ -128,3 +128,26 @@ def test_riemannian_eigen_crossover():
     assert trial.shape == (n_pop, dim)
     assert not np.array_equal(trial, target)
     assert not np.array_equal(trial, donor)
+
+
+def test_riemannian_tangent_crossover():
+    from rma_ea.operators import riemannian_tangent_crossover
+    dim = 8
+    n_pop = 25
+    rng = np.random.default_rng(2026)
+    target = rng.standard_normal((n_pop, dim))
+    donor = rng.standard_normal((n_pop, dim))
+    Cr = np.full(n_pop, 0.8)
+    
+    Q, _ = np.linalg.qr(rng.standard_normal((dim, dim)))
+    
+    # 1. 100% chart selection
+    use_chart_all = np.ones(n_pop, dtype=bool)
+    trial_rot = riemannian_tangent_crossover(target, donor, Cr, eigen_basis=Q, use_chart=use_chart_all, rng=rng)
+    assert trial_rot.shape == (n_pop, dim)
+    
+    # 2. 0% chart selection (pure Cartesian)
+    use_chart_none = np.zeros(n_pop, dtype=bool)
+    trial_can = riemannian_tangent_crossover(target, donor, Cr, eigen_basis=Q, use_chart=use_chart_none, rng=rng)
+    assert trial_can.shape == (n_pop, dim)
+

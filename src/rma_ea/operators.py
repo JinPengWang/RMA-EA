@@ -37,20 +37,23 @@ def repair_bounds(
 
 
 class ParameterMemory:
-    """Historical parameter memory for scale factor F and crossover rate Cr."""
+    """Historical parameter memory for scale factor F, crossover rate Cr, and chart selection."""
     
-    def __init__(self, memory_size: int = 15, init_F: float = 0.5, init_Cr: float = 0.5):
+    def __init__(self, memory_size: int = 20, init_F: float = 0.5, init_Cr: float = 0.5):
         self.memory_size = memory_size
         self.M_F = np.full(memory_size, init_F, dtype=np.float64)
         self.M_Cr = np.full(memory_size, init_Cr, dtype=np.float64)
+        # Multi-chart initialization: alternate exploratory and metric-focused slots
+        self.M_chart = np.array([0.9 if i % 2 == 0 else 0.1 for i in range(memory_size)], dtype=np.float64)
         self.memory_ptr = 0
         
     def sample_parameters(
         self,
         size: int,
-        rng: Optional[np.random.Generator] = None
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Sample F from Cauchy and Cr from Gaussian around memory locations."""
+        rng: Optional[np.random.Generator] = None,
+        return_chart: bool = False
+    ) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+        """Sample F from Cauchy, Cr from Gaussian, and optionally chart choice from Bernoulli."""
         if rng is None:
             rng = np.random.default_rng()
             
@@ -72,15 +75,21 @@ class ParameterMemory:
         sampled_Cr = self.M_Cr[r_indices] + 0.1 * rng.standard_normal(size)
         sampled_Cr = np.clip(sampled_Cr, 0.0, 1.0)
         
+        if return_chart:
+            chart_probs = self.M_chart[r_indices]
+            use_chart = rng.random(size) < chart_probs
+            return sampled_F, sampled_Cr, use_chart, r_indices
+            
         return sampled_F, sampled_Cr
         
     def update_memory(
         self,
         successful_F: np.ndarray,
         successful_Cr: np.ndarray,
-        fitness_improvements: np.ndarray
+        fitness_improvements: np.ndarray,
+        successful_chart: Optional[np.ndarray] = None
     ) -> None:
-        """Update memory slots using Lehmer mean for F and weighted mean for Cr."""
+        """Update memory slots using Lehmer mean for F, weighted mean for Cr and chart."""
         if len(successful_F) == 0:
             return
             
@@ -100,6 +109,11 @@ class ParameterMemory:
         
         self.M_F[self.memory_ptr] = float(np.clip(mean_L_F, 0.01, 1.0))
         self.M_Cr[self.memory_ptr] = float(np.clip(mean_A_Cr, 0.0, 1.0))
+        
+        if successful_chart is not None and len(successful_chart) > 0:
+            mean_chart = np.sum(weights * successful_chart.astype(float))
+            self.M_chart[self.memory_ptr] = float(np.clip(mean_chart, 0.05, 0.95))
+            
         self.memory_ptr = (self.memory_ptr + 1) % self.memory_size
 
 
@@ -259,3 +273,50 @@ def riemannian_eigen_crossover(
     if return_used_mask:
         return trial, use_rot
     return trial
+
+
+def riemannian_tangent_crossover(
+    target: np.ndarray,
+    donor: np.ndarray,
+    Cr: np.ndarray,
+    eigen_basis: np.ndarray,
+    use_chart: np.ndarray,
+    rng: Optional[np.random.Generator] = None
+) -> np.ndarray:
+    """Riemannian Tangent Projection Crossover (Version 3.0).
+    
+    Decomposes the tangent displacement vector d = donor - target onto the
+    orthonormal Riemannian principal tangent frame U = [u_1, ..., u_D]:
+        alpha_i = (v_i - x_i) @ U
+    Performs binomial selection of independent geodesic modes:
+        u_i = x_i + U [ m_i * alpha_i ]
+    For individuals in the canonical chart (use_chart == False):
+        u_i = x_i + m_i * (v_i - x_i)
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+        
+    n_pop, dim = target.shape
+    d = donor - target
+    
+    # Binary binomial selection mask
+    mask = rng.random((n_pop, dim)) <= Cr[:, np.newaxis]
+    j_rand = rng.integers(0, dim, size=n_pop)
+    for i in range(n_pop):
+        mask[i, j_rand[i]] = True
+        
+    trials = target.copy()
+    
+    # Canonical Euclidean chart
+    idx_can = np.where(~use_chart)[0]
+    if len(idx_can) > 0:
+        trials[idx_can] = np.where(mask[idx_can], donor[idx_can], target[idx_can])
+        
+    # Riemannian principal tangent chart
+    idx_rot = np.where(use_chart)[0]
+    if len(idx_rot) > 0:
+        alpha = d[idx_rot] @ eigen_basis
+        trials[idx_rot] = target[idx_rot] + (mask[idx_rot] * alpha) @ eigen_basis.T
+        
+    return trials
+

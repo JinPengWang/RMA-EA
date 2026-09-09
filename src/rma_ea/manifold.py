@@ -85,6 +85,59 @@ def update_riemannian_barycenter(
     return matrix_exp(log_updated)
 
 
+class RiemannianMetricFlow:
+    """Continuous Riemannian Metric Flow Tracker on S++^D.
+    
+    Maintains the empirical cometric tensor C_t = G_t^{-1} along the manifold
+    of positive-definite matrices:
+        C_{t+1} = (1 - c_c) C_t + c_c * (C_emp / Tr(C_emp)/D)
+    Guarantees full-rank Riemannian geometry across all search phases even
+    when the population size N drops below problem dimension D.
+    """
+    def __init__(self, dim: int, learning_rate: Optional[float] = None):
+        self.dim = dim
+        self.c_c = learning_rate if learning_rate is not None else 2.0 / (dim ** 1.5)
+        self.C = np.eye(dim, dtype=np.float64)
+        self.U = np.eye(dim, dtype=np.float64)
+        self.eig_vals = np.ones(dim, dtype=np.float64)
+        
+    def update(self, elite_samples: np.ndarray, weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Update Riemannian metric flow with newly observed elite individuals.
+        
+        Args:
+            elite_samples: (mu, D) matrix of elite decision vectors.
+            weights: (mu,) normalized ranking weights (sum(w) = 1).
+            
+        Returns:
+            U: (D, D) orthonormal Riemannian tangent basis.
+            eig_vals: (D,) sorted eigenvalues of cometric tensor.
+        """
+        mu, D = elite_samples.shape
+        w_sum = np.sum(weights)
+        norm_w = weights / w_sum if w_sum > 0 else np.ones(mu) / mu
+        
+        # Weighted mean and empirical covariance
+        mean = np.sum(elite_samples * norm_w[:, np.newaxis], axis=0)
+        diff = elite_samples - mean
+        C_emp = (diff.T * norm_w) @ diff
+        
+        # Scale-invariant normalization
+        tr_mean = np.trace(C_emp) / max(D, 1)
+        C_norm = C_emp / (tr_mean + 1e-12) if tr_mean > 1e-12 else np.eye(D)
+        
+        # Riemannian metric flow integration
+        self.C = (1.0 - self.c_c) * self.C + self.c_c * C_norm
+        self.C = symmetrize(self.C)
+        
+        # Spectral decomposition of cometric tensor
+        vals, vecs = np.linalg.eigh(self.C)
+        sort_idx = np.argsort(vals)[::-1]
+        self.eig_vals = np.maximum(vals[sort_idx], 1e-12)
+        self.U = vecs[:, sort_idx]
+        
+        return self.U, self.eig_vals
+
+
 def low_rank_covariance_decompose(
     samples: np.ndarray,
     weights: np.ndarray,
