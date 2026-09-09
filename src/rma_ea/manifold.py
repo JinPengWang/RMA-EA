@@ -127,9 +127,14 @@ class RiemannianMetricFlow:
         tr_mean = np.trace(C_emp) / max(D, 1)
         C_norm = C_emp / (tr_mean + 1e-12) if tr_mean > 1e-12 else np.eye(D)
         
+        # Parameter-free Bayesian Riemannian shrinkage towards isotropic metric I
+        # rho = D / (mu + D) prevents Marchenko-Pastur rank-deficiency when mu < D
+        rho = float(D) / float(mu + D)
+        C_shrunk = (1.0 - rho) * C_norm + rho * np.eye(D)
+        
         # Bayesian optimal metric flow integration (warm-up decaying to asymptotic rate)
         c_c = max(2.0 / (self.iteration + 2.0), self.c_c_inf)
-        self.C = (1.0 - c_c) * self.C + c_c * C_norm
+        self.C = (1.0 - c_c) * self.C + c_c * C_shrunk
         self.C = symmetrize(self.C)
         
         # Spectral decomposition of cometric tensor

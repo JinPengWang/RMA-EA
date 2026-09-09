@@ -37,13 +37,38 @@ def repair_bounds(
 
 
 class ParameterMemory:
-    """Historical parameter memory for scale factor F, crossover rate Cr, and chart selection."""
+    """Riemannian Atlas Parameter Memory for Canonical & Tangent Charts.
     
+    In Riemannian Differential Geometry, a manifold atlas A = {(U_alpha, phi_alpha)}
+    consists of coordinate charts with distinct characteristic velocities.
+    This class maintains chart-specific historical memory:
+        Chart 0 (Canonical Euclidean chart phi_0): (M_F_can, M_Cr_can)
+        Chart 1 (Riemannian Principal Tangent chart phi_1): (M_F_rot, M_Cr_rot)
+    Eliminates parameter cross-contamination across coordinate charts.
+    Chart selection is governed by a smooth Bayesian conjugate posterior:
+        p_rot <- (1 - c_chart) * p_rot + c_chart * (r_rot / (r_rot + r_can))
+        c_chart = 1 / H
+    """
     def __init__(self, memory_size: int = 6, init_F: float = 0.5, init_Cr: float = 0.5):
         self.memory_size = memory_size
-        self.M_F = np.full(memory_size, init_F, dtype=np.float64)
-        self.M_Cr = np.full(memory_size, init_Cr, dtype=np.float64)
-        # Neutral Bernoulli prior across all historical memory slots
+        self.c_chart = 1.0 / float(memory_size)
+        
+        # Chart 0: Canonical coordinate chart memory
+        self.M_F_can = np.full(memory_size, init_F, dtype=np.float64)
+        self.M_Cr_can = np.full(memory_size, init_Cr, dtype=np.float64)
+        self.ptr_can = 0
+        
+        # Chart 1: Riemannian principal tangent chart memory
+        self.M_F_rot = np.full(memory_size, init_F, dtype=np.float64)
+        self.M_Cr_rot = np.full(memory_size, init_Cr, dtype=np.float64)
+        self.ptr_rot = 0
+        
+        # Smooth Bayesian chart transition probability
+        self.p_rot = 0.5
+        
+        # Backward-compatibility properties
+        self.M_F = self.M_F_can
+        self.M_Cr = self.M_Cr_can
         self.M_chart = np.full(memory_size, 0.5, dtype=np.float64)
         self.memory_ptr = 0
         
@@ -53,34 +78,50 @@ class ParameterMemory:
         rng: Optional[np.random.Generator] = None,
         return_chart: bool = False
     ) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-        """Sample F from Cauchy, Cr from Gaussian, and optionally chart choice from Bernoulli."""
+        """Sample chart-specific F and Cr parameters according to the Riemannian atlas."""
         if rng is None:
             rng = np.random.default_rng()
             
-        r_indices = rng.integers(0, self.memory_size, size=size)
+        use_chart = rng.random(size) < self.p_rot
+        F = np.zeros(size, dtype=np.float64)
+        Cr = np.zeros(size, dtype=np.float64)
+        slot_indices = np.zeros(size, dtype=int)
         
-        # Sample F using Cauchy distribution
-        sampled_F = np.zeros(size, dtype=np.float64)
-        for i in range(size):
-            while True:
-                f_val = self.M_F[r_indices[i]] + 0.1 * rng.standard_cauchy()
-                if f_val > 1.0:
-                    sampled_F[i] = 1.0
-                    break
-                elif f_val > 0.0:
-                    sampled_F[i] = f_val
-                    break
-                    
-        # Sample Cr using Gaussian distribution
-        sampled_Cr = self.M_Cr[r_indices] + 0.1 * rng.standard_normal(size)
-        sampled_Cr = np.clip(sampled_Cr, 0.0, 1.0)
-        
-        if return_chart:
-            chart_probs = self.M_chart[r_indices]
-            use_chart = rng.random(size) < chart_probs
-            return sampled_F, sampled_Cr, use_chart, r_indices
+        # Sample for Chart 0 (Canonical)
+        idx_can = np.where(~use_chart)[0]
+        if len(idx_can) > 0:
+            r_c = rng.integers(0, self.memory_size, size=len(idx_can))
+            slot_indices[idx_can] = r_c
+            for i_c, i_pop in enumerate(idx_can):
+                while True:
+                    val = self.M_F_can[r_c[i_c]] + 0.1 * rng.standard_cauchy()
+                    if val > 1.0:
+                        F[i_pop] = 1.0
+                        break
+                    elif val > 0.0:
+                        F[i_pop] = val
+                        break
+            Cr[idx_can] = np.clip(self.M_Cr_can[r_c] + 0.1 * rng.standard_normal(len(idx_can)), 0.0, 1.0)
             
-        return sampled_F, sampled_Cr
+        # Sample for Chart 1 (Riemannian Tangent)
+        idx_rot = np.where(use_chart)[0]
+        if len(idx_rot) > 0:
+            r_r = rng.integers(0, self.memory_size, size=len(idx_rot))
+            slot_indices[idx_rot] = r_r
+            for i_r, i_pop in enumerate(idx_rot):
+                while True:
+                    val = self.M_F_rot[r_r[i_r]] + 0.1 * rng.standard_cauchy()
+                    if val > 1.0:
+                        F[i_pop] = 1.0
+                        break
+                    elif val > 0.0:
+                        F[i_pop] = val
+                        break
+            Cr[idx_rot] = np.clip(self.M_Cr_rot[r_r] + 0.1 * rng.standard_normal(len(idx_rot)), 0.0, 1.0)
+            
+        if return_chart:
+            return F, Cr, use_chart, slot_indices
+        return F, Cr
         
     def update_memory(
         self,
@@ -90,39 +131,58 @@ class ParameterMemory:
         successful_chart: Optional[np.ndarray] = None,
         chart_stats: Optional[Tuple[int, int, int, int]] = None
     ) -> None:
-        """Update memory slots using Lehmer mean for F, weighted mean for Cr, and Bayesian posterior for chart."""
+        """Update chart-specific memory slots and smooth Bayesian transition posterior."""
         if len(successful_F) == 0:
             return
             
-        total_imp = np.sum(fitness_improvements)
-        if total_imp <= 0:
-            weights = np.ones(len(fitness_improvements)) / len(fitness_improvements)
-        else:
-            weights = fitness_improvements / total_imp
+        if successful_chart is not None:
+            succ_can = ~successful_chart
+            succ_rot = successful_chart
             
-        # Lehmer mean for F: sum(w * F^2) / sum(w * F)
-        sum_w_f2 = np.sum(weights * (successful_F**2))
-        sum_w_f = np.sum(weights * successful_F)
-        mean_L_F = sum_w_f2 / max(sum_w_f, 1e-12)
-        
-        # Weighted mean for Cr
-        mean_A_Cr = np.sum(weights * successful_Cr)
-        
-        self.M_F[self.memory_ptr] = float(np.clip(mean_L_F, 0.01, 1.0))
-        self.M_Cr[self.memory_ptr] = float(np.clip(mean_A_Cr, 0.0, 1.0))
-        
-        # Bayesian Bernoulli conjugate posterior update for manifold chart selection
+            # Update Chart 0 (Canonical)
+            if np.any(succ_can):
+                w_c = fitness_improvements[succ_can]
+                total_w_c = np.sum(w_c)
+                norm_w_c = w_c / total_w_c if total_w_c > 0 else np.ones(len(w_c)) / len(w_c)
+                f_c = successful_F[succ_can]
+                cr_c = successful_Cr[succ_can]
+                mean_L_F_c = np.sum(norm_w_c * (f_c**2)) / max(np.sum(norm_w_c * f_c), 1e-12)
+                mean_A_Cr_c = np.sum(norm_w_c * cr_c)
+                self.M_F_can[self.ptr_can] = float(np.clip(mean_L_F_c, 0.01, 1.0))
+                self.M_Cr_can[self.ptr_can] = float(np.clip(mean_A_Cr_c, 0.0, 1.0))
+                self.ptr_can = (self.ptr_can + 1) % self.memory_size
+                
+            # Update Chart 1 (Riemannian Tangent)
+            if np.any(succ_rot):
+                w_r = fitness_improvements[succ_rot]
+                total_w_r = np.sum(w_r)
+                norm_w_r = w_r / total_w_r if total_w_r > 0 else np.ones(len(w_r)) / len(w_r)
+                f_r = successful_F[succ_rot]
+                cr_r = successful_Cr[succ_rot]
+                mean_L_F_r = np.sum(norm_w_r * (f_r**2)) / max(np.sum(norm_w_r * f_r), 1e-12)
+                mean_A_Cr_r = np.sum(norm_w_r * cr_r)
+                self.M_F_rot[self.ptr_rot] = float(np.clip(mean_L_F_r, 0.01, 1.0))
+                self.M_Cr_rot[self.ptr_rot] = float(np.clip(mean_A_Cr_r, 0.0, 1.0))
+                self.ptr_rot = (self.ptr_rot + 1) % self.memory_size
+        else:
+            total_imp = np.sum(fitness_improvements)
+            weights = fitness_improvements / total_imp if total_imp > 0 else np.ones(len(fitness_improvements)) / len(fitness_improvements)
+            mean_L_F = np.sum(weights * (successful_F**2)) / max(np.sum(weights * successful_F), 1e-12)
+            mean_A_Cr = np.sum(weights * successful_Cr)
+            self.M_F_can[self.ptr_can] = float(np.clip(mean_L_F, 0.01, 1.0))
+            self.M_Cr_can[self.ptr_can] = float(np.clip(mean_A_Cr, 0.0, 1.0))
+            self.ptr_can = (self.ptr_can + 1) % self.memory_size
+
+        # Smooth Bayesian chart posterior update
         if chart_stats is not None:
             n_rot_eval, n_rot_succ, n_can_eval, n_can_succ = chart_stats
             r_rot = (n_rot_succ + 0.1) / (n_rot_eval + 0.2)
             r_can = (n_can_succ + 0.1) / (n_can_eval + 0.2)
-            p_rot = r_rot / (r_rot + r_can)
-            self.M_chart[self.memory_ptr] = float(np.clip(p_rot, 0.1, 0.9))
-        elif successful_chart is not None and len(successful_chart) > 0:
-            mean_chart = np.sum(weights * successful_chart.astype(float))
-            self.M_chart[self.memory_ptr] = float(np.clip(mean_chart, 0.05, 0.95))
+            target_p = r_rot / (r_rot + r_can)
+            self.p_rot = float(np.clip((1.0 - self.c_chart) * self.p_rot + self.c_chart * target_p, 0.05, 0.95))
+            self.M_chart[:] = self.p_rot
             
-        self.memory_ptr = (self.memory_ptr + 1) % self.memory_size
+        self.memory_ptr = self.ptr_can
 
 
 class DualChannelMutation:

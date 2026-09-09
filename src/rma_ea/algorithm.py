@@ -279,16 +279,13 @@ class RMA_EA:
             
             if target_pop_size < current_pop_size:
                 sort_idx = np.argsort(fitness)
-                pruned_individuals = pop[sort_idx[target_pop_size:]]
-                archive = np.vstack([archive, pruned_individuals])
-                max_archive_size = int(self.arc_rate * target_pop_size)
-                if len(archive) > max_archive_size:
-                    rand_perm = self.rng.permutation(len(archive))[:max_archive_size]
-                    archive = archive[rand_perm]
-                    
                 pop = pop[sort_idx[:target_pop_size]]
                 fitness = fitness[sort_idx[:target_pop_size]]
                 current_pop_size = target_pop_size
+                max_archive_size = int(self.arc_rate * current_pop_size)
+                if len(archive) > max_archive_size:
+                    rand_perm = self.rng.permutation(len(archive))[:max_archive_size]
+                    archive = archive[rand_perm]
                 
             cur_best = float(np.min(fitness))
             if cur_best < global_best_f:
