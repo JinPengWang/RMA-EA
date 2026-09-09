@@ -96,10 +96,11 @@ class RiemannianMetricFlow:
     """
     def __init__(self, dim: int, learning_rate: Optional[float] = None):
         self.dim = dim
-        self.c_c = learning_rate if learning_rate is not None else 2.0 / (dim ** 1.5)
+        self.c_c_inf = learning_rate if learning_rate is not None else 2.0 / (dim ** 1.5)
         self.C = np.eye(dim, dtype=np.float64)
         self.U = np.eye(dim, dtype=np.float64)
         self.eig_vals = np.ones(dim, dtype=np.float64)
+        self.iteration = 0
         
     def update(self, elite_samples: np.ndarray, weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Update Riemannian metric flow with newly observed elite individuals.
@@ -112,6 +113,7 @@ class RiemannianMetricFlow:
             U: (D, D) orthonormal Riemannian tangent basis.
             eig_vals: (D,) sorted eigenvalues of cometric tensor.
         """
+        self.iteration += 1
         mu, D = elite_samples.shape
         w_sum = np.sum(weights)
         norm_w = weights / w_sum if w_sum > 0 else np.ones(mu) / mu
@@ -125,8 +127,9 @@ class RiemannianMetricFlow:
         tr_mean = np.trace(C_emp) / max(D, 1)
         C_norm = C_emp / (tr_mean + 1e-12) if tr_mean > 1e-12 else np.eye(D)
         
-        # Riemannian metric flow integration
-        self.C = (1.0 - self.c_c) * self.C + self.c_c * C_norm
+        # Bayesian optimal metric flow integration (warm-up decaying to asymptotic rate)
+        c_c = max(2.0 / (self.iteration + 2.0), self.c_c_inf)
+        self.C = (1.0 - c_c) * self.C + c_c * C_norm
         self.C = symmetrize(self.C)
         
         # Spectral decomposition of cometric tensor

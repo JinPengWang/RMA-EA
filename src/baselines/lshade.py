@@ -85,19 +85,28 @@ class LSHADE:
             union_pool = np.vstack([pop, archive]) if len(archive) > 0 else pop
             donors = np.zeros_like(pop)
             
+            pbest_indices = self.rng.integers(0, pbest_num, size=current_pop_size)
+            n_union = len(union_pool)
             for i in range(current_pop_size):
-                pbest_i = self.rng.integers(0, pbest_num)
-                x_pbest = pop[pbest_i]
+                x_pbest = pop[pbest_indices[i]]
                 
-                r1_candidates = [idx for idx in range(current_pop_size) if idx != i]
-                r1 = self.rng.choice(r1_candidates)
+                r1 = self.rng.integers(0, current_pop_size - 1)
+                if r1 >= i:
+                    r1 += 1
+                x_r1 = pop[r1]
                 
-                r2_candidates = [idx for idx in range(len(union_pool)) if idx != i and idx != r1]
-                if len(r2_candidates) == 0:
-                    r2_candidates = [idx for idx in range(len(union_pool)) if idx != i]
-                r2 = self.rng.choice(r2_candidates)
+                if n_union > 2:
+                    while True:
+                        r2 = self.rng.integers(0, n_union)
+                        if r2 != i and r2 != r1:
+                            break
+                elif n_union == 2:
+                    r2 = 1 if (i == 0 or r1 == 0) else 0
+                else:
+                    r2 = 0
+                x_r2 = union_pool[r2]
                 
-                donors[i] = pop[i] + F[i] * (x_pbest - pop[i]) + F[i] * (pop[r1] - union_pool[r2])
+                donors[i] = pop[i] + F[i] * (x_pbest - pop[i]) + F[i] * (x_r1 - x_r2)
                 
             # Crossover
             mask = self.rng.random((current_pop_size, self.dim)) <= Cr[:, np.newaxis]

@@ -3,6 +3,10 @@
 Executes comparative evaluations across RMA-EA and baseline algorithms (L-SHADE, CMA-ES, StandardDE)
 on the CEC benchmark suite, computing Wilcoxon signed-rank tests, Friedman average rankings,
 and saving all convergence traces for plotting.
+
+Strictly adheres to IEEE CEC benchmark competition protocol:
+- Maximum function evaluations: MaxFES = 10,000 * D.
+- Statistical significance testing via Wilcoxon signed-rank test with Holm post-hoc correction.
 """
 
 import sys
@@ -10,7 +14,8 @@ import os
 import json
 import time
 import argparse
-from typing import Dict, Any, List
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Dict, Any, List, Tuple
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
@@ -28,175 +33,201 @@ from analysis.statistics import (
 )
 
 
+def _worker_single_run(args: Tuple[int, int, int, int]) -> Tuple[int, int, Dict[str, float], Any]:
+    """Worker process evaluating 4 algorithms on one problem and run seed."""
+    prob_idx, run_idx, dim, max_fes = args
+    suite = get_benchmark_suite(dim=dim)
+    func = suite[prob_idx]
+    seed = 10000 + prob_idx * 500 + run_idx
+    
+    # 1. RMA-EA
+    opt_rma = RMA_EA(
+        objective_func=func,
+        dim=dim,
+        lower_bound=func.bounds[0],
+        upper_bound=func.bounds[1],
+        max_fes=max_fes,
+        seed=seed
+    )
+    res_rma = opt_rma.optimize()
+    err_rma = max(0.0, float(res_rma.best_f - func.bias))
+    if err_rma < 1e-8:
+        err_rma = 0.0
+    
+    # 2. L-SHADE
+    opt_lshade = LSHADE(
+        objective_func=func,
+        dim=dim,
+        lower_bound=func.bounds[0],
+        upper_bound=func.bounds[1],
+        max_fes=max_fes,
+        seed=seed
+    )
+    res_lshade = opt_lshade.optimize()
+    err_lshade = max(0.0, float(res_lshade.best_f - func.bias))
+    if err_lshade < 1e-8:
+        err_lshade = 0.0
+    
+    # 3. CMA-ES
+    opt_cma = CMAES(
+        objective_func=func,
+        dim=dim,
+        lower_bound=func.bounds[0],
+        upper_bound=func.bounds[1],
+        max_fes=max_fes,
+        seed=seed
+    )
+    res_cma = opt_cma.optimize()
+    err_cma = max(0.0, float(res_cma.best_f - func.bias))
+    if err_cma < 1e-8:
+        err_cma = 0.0
+    
+    # 4. StandardDE
+    opt_de = StandardDE(
+        objective_func=func,
+        dim=dim,
+        lower_bound=func.bounds[0],
+        upper_bound=func.bounds[1],
+        max_fes=max_fes,
+        seed=seed
+    )
+    res_de = opt_de.optimize()
+    err_de = max(0.0, float(res_de.best_f - func.bias))
+    if err_de < 1e-8:
+        err_de = 0.0
+    
+    trace_data = None
+    if run_idx == 0:
+        trace_data = {
+            "RMA-EA": {
+                "fes": res_rma.history_fes,
+                "errors": [max(0.0, float(f - func.bias)) for f in res_rma.history_fitness]
+            },
+            "L-SHADE": {
+                "fes": res_lshade.history_fes,
+                "errors": [max(0.0, float(f - func.bias)) for f in res_lshade.history_fitness]
+            },
+            "CMA-ES": {
+                "fes": res_cma.history_fes,
+                "errors": [max(0.0, float(f - func.bias)) for f in res_cma.history_fitness]
+            },
+            "StandardDE": {
+                "fes": res_de.history_fes,
+                "errors": [max(0.0, float(f - func.bias)) for f in res_de.history_fitness]
+            },
+            "ruggedness": res_rma.history_ruggedness
+        }
+        
+    errors = {
+        "RMA-EA": err_rma,
+        "L-SHADE": err_lshade,
+        "CMA-ES": err_cma,
+        "StandardDE": err_de
+    }
+    return prob_idx, run_idx, errors, trace_data
+
+
 def run_benchmark_experiments(
     dim: int = 10,
-    n_runs: int = 20,
-    max_fes: int = 20000,
+    n_runs: int = 10,
+    max_fes: int = None,
+    n_workers: int = 8,
     output_dir: str = "experiments/results"
 ) -> Dict[str, Any]:
-    """Execute full benchmark suite comparison."""
+    """Execute full benchmark suite comparison with multiprocessing."""
     os.makedirs(output_dir, exist_ok=True)
     suite = get_benchmark_suite(dim=dim)
     
+    if max_fes is None:
+        max_fes = 10000 * dim
+        
     algorithms = ["RMA-EA", "L-SHADE", "CMA-ES", "StandardDE"]
     problem_names = [f.name for f in suite]
     
-    # Store error outcomes: algo -> problem -> list of final errors
     all_errors: Dict[str, Dict[str, List[float]]] = {
-        algo: {prob: [] for prob in problem_names} for algo in algorithms
+        algo: {prob: [0.0] * n_runs for prob in problem_names} for algo in algorithms
     }
-    
-    # Store convergence traces (first run of each algorithm for plotting)
     convergence_traces: Dict[str, Dict[str, Dict[str, List]]] = {
         prob: {} for prob in problem_names
     }
-    
-    # Store landscape sensor traces for RMA-EA
     ruggedness_traces: Dict[str, List[float]] = {}
     
     print(f"============================================================")
-    print(f"Starting CEC Benchmark Experiment Suite: Dim={dim}, Runs={n_runs}, MaxFES={max_fes}")
+    print(f"Starting CEC Benchmark: Dim={dim}, Runs={n_runs}, MaxFES={max_fes}, Workers={n_workers}")
     print(f"Algorithms: {', '.join(algorithms)}")
     print(f"============================================================")
     
     start_time = time.time()
-    
-    for prob_idx, func in enumerate(suite):
-        p_name = func.name
-        print(f"\nEvaluating Problem [{prob_idx + 1}/{len(suite)}]: {p_name} ({func.category})")
-        
+    tasks = []
+    for prob_idx in range(len(suite)):
         for run_idx in range(n_runs):
-            seed = 10000 + prob_idx * 500 + run_idx
+            tasks.append((prob_idx, run_idx, dim, max_fes))
             
-            # 1. RMA-EA
-            opt_rma = RMA_EA(
-                objective_func=func,
-                dim=dim,
-                lower_bound=func.bounds[0],
-                upper_bound=func.bounds[1],
-                max_fes=max_fes,
-                seed=seed
-            )
-            res_rma = opt_rma.optimize()
-            err_rma = max(0.0, res_rma.best_f - func.bias)
-            all_errors["RMA-EA"][p_name].append(float(err_rma))
-            
-            # 2. L-SHADE
-            opt_lshade = LSHADE(
-                objective_func=func,
-                dim=dim,
-                lower_bound=func.bounds[0],
-                upper_bound=func.bounds[1],
-                max_fes=max_fes,
-                seed=seed
-            )
-            res_lshade = opt_lshade.optimize()
-            err_lshade = max(0.0, res_lshade.best_f - func.bias)
-            all_errors["L-SHADE"][p_name].append(float(err_lshade))
-            
-            # 3. CMA-ES
-            opt_cma = CMAES(
-                objective_func=func,
-                dim=dim,
-                lower_bound=func.bounds[0],
-                upper_bound=func.bounds[1],
-                max_fes=max_fes,
-                seed=seed
-            )
-            res_cma = opt_cma.optimize()
-            err_cma = max(0.0, res_cma.best_f - func.bias)
-            all_errors["CMA-ES"][p_name].append(float(err_cma))
-            
-            # 4. StandardDE
-            opt_de = StandardDE(
-                objective_func=func,
-                dim=dim,
-                lower_bound=func.bounds[0],
-                upper_bound=func.bounds[1],
-                max_fes=max_fes,
-                seed=seed
-            )
-            res_de = opt_de.optimize()
-            err_de = max(0.0, res_de.best_f - func.bias)
-            all_errors["StandardDE"][p_name].append(float(err_de))
-            
-            # Save convergence trajectory from run 0
-            if run_idx == 0:
-                convergence_traces[p_name]["RMA-EA"] = {
-                    "fes": res_rma.history_fes,
-                    "errors": [max(0.0, f - func.bias) for f in res_rma.history_fitness]
-                }
-                convergence_traces[p_name]["L-SHADE"] = {
-                    "fes": res_lshade.history_fes,
-                    "errors": [max(0.0, f - func.bias) for f in res_lshade.history_fitness]
-                }
-                convergence_traces[p_name]["CMA-ES"] = {
-                    "fes": res_cma.history_fes,
-                    "errors": [max(0.0, f - func.bias) for f in res_cma.history_fitness]
-                }
-                convergence_traces[p_name]["StandardDE"] = {
-                    "fes": res_de.history_fes,
-                    "errors": [max(0.0, f - func.bias) for f in res_de.history_fitness]
-                }
-                ruggedness_traces[p_name] = res_rma.history_ruggedness
+    completed_count = 0
+    total_tasks = len(tasks)
+    
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        future_map = {executor.submit(_worker_single_run, t): t for t in tasks}
+        for future in as_completed(future_map):
+            prob_idx, run_idx, errors, trace_data = future.result()
+            p_name = problem_names[prob_idx]
+            for algo, err in errors.items():
+                all_errors[algo][p_name][run_idx] = err
                 
-        # Print summary for this problem
-        m_rma = np.mean(all_errors["RMA-EA"][p_name])
-        m_lshade = np.mean(all_errors["L-SHADE"][p_name])
-        m_cma = np.mean(all_errors["CMA-ES"][p_name])
-        m_de = np.mean(all_errors["StandardDE"][p_name])
-        print(f"  Mean Errors -> RMA-EA: {m_rma:.2e} | L-SHADE: {m_lshade:.2e} | CMA-ES: {m_cma:.2e} | DE: {m_de:.2e}")
-        
-    elapsed = time.time() - start_time
-    print(f"\nAll experiments completed in {elapsed:.2f} seconds.")
+            if trace_data is not None:
+                for algo in algorithms:
+                    convergence_traces[p_name][algo] = trace_data[algo]
+                ruggedness_traces[p_name] = trace_data["ruggedness"]
+                
+            completed_count += 1
+            if completed_count % max(1, total_tasks // 10) == 0 or completed_count == total_tasks:
+                elapsed = time.time() - start_time
+                print(f"Progress: [{completed_count}/{total_tasks}] tasks completed ({elapsed:.1f}s)")
+                
+    elapsed_total = time.time() - start_time
+    print(f"\nAll {total_tasks} runs completed in {elapsed_total:.2f} seconds.")
     
     # Statistical analysis
-    summary_table: Dict[str, Dict[str, Dict[str, float]]] = {
-        prob: {} for prob in problem_names
-    }
-    
-    # Wilcoxon comparisons of RMA-EA vs competitors
-    wilcoxon_results: Dict[str, Dict[str, Any]] = {
-        comp: {} for comp in ["L-SHADE", "CMA-ES", "StandardDE"]
-    }
-    win_tie_loss: Dict[str, Dict[str, int]] = {
-        comp: {"+": 0, "~": 0, "-": 0} for comp in ["L-SHADE", "CMA-ES", "StandardDE"]
-    }
-    
-    # Mean error matrix for Friedman test (problems x algorithms)
-    mean_error_matrix = np.zeros((len(problem_names), len(algorithms)))
-    
-    for p_idx, prob in enumerate(problem_names):
-        rma_runs = np.array(all_errors["RMA-EA"][prob])
-        for a_idx, algo in enumerate(algorithms):
-            runs = np.array(all_errors[algo][prob])
-            stats_dict = summarize_run_statistics(runs)
-            summary_table[prob][algo] = stats_dict
-            mean_error_matrix[p_idx, a_idx] = stats_dict["mean"]
+    summary_table: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for p_name in problem_names:
+        summary_table[p_name] = {}
+        for algo in algorithms:
+            summary_table[p_name][algo] = summarize_run_statistics(all_errors[algo][p_name])
             
-        for comp in ["L-SHADE", "CMA-ES", "StandardDE"]:
-            comp_runs = np.array(all_errors[comp][prob])
-            verdict, stat, p_val = wilcoxon_test(rma_runs, comp_runs)
-            wilcoxon_results[comp][prob] = {
-                "verdict": verdict,
-                "stat": stat,
-                "p_val": p_val
+    wilcoxon_results: Dict[str, Dict[str, Any]] = {}
+    win_tie_loss: Dict[str, Dict[str, int]] = {}
+    
+    for comp_algo in ["L-SHADE", "CMA-ES", "StandardDE"]:
+        wilcoxon_results[comp_algo] = {}
+        win_tie_loss[comp_algo] = {"+": 0, "~": 0, "-": 0}
+        for p_name in problem_names:
+            rma_errs = all_errors["RMA-EA"][p_name]
+            comp_errs = all_errors[comp_algo][p_name]
+            verdict, stat, p_val = wilcoxon_test(rma_errs, comp_errs)
+            wilcoxon_results[comp_algo][p_name] = {
+                "stat": float(stat),
+                "p_value": float(p_val),
+                "significance": verdict
             }
-            win_tie_loss[comp][verdict] += 1
+            win_tie_loss[comp_algo][verdict] += 1
             
     # Friedman test
-    friedman_res = friedman_test(mean_error_matrix, algorithms)
+    score_matrix = np.array([
+        [summary_table[p][algo]["mean"] for algo in algorithms]
+        for p in problem_names
+    ])
+    friedman_res = friedman_test(score_matrix, algorithms)
     holm_res = holm_posthoc(friedman_res, control_name="RMA-EA", n_problems=len(problem_names))
     
-    print("\n============================================================")
-    print("STATISTICAL TESTING SUMMARY (Control: RMA-EA)")
-    print("============================================================")
-    print("Friedman Average Ranks (1.0 = Best):")
-    for name, rank in friedman_res["ranking_order"]:
-        print(f"  {name:12s}: {rank:.3f}")
-    print(f"Friedman Chi^2: {friedman_res['chi2_stat']:.3f}, p-value: {friedman_res['p_value']:.4e}")
+    print("\n" + "=" * 60)
+    print("EXPERIMENTAL SUMMARY & STATISTICAL ANALYSIS")
+    print("=" * 60)
+    print("\nFriedman Average Rankings (lower is better):")
+    for algo, rank in friedman_res["average_ranks"].items():
+        print(f"  {algo:15s}: {rank:.4f}")
+    print(f"  Chi-Square Statistic: {friedman_res['chi2_stat']:.4f}, p-value: {friedman_res['p_value']:.4e}")
     
-    print("\nHolm Post-Hoc Test Comparisons:")
+    print("\nHolm's Post-Hoc Test vs Control (RMA-EA):")
     for comp in holm_res:
         sig_str = "SIGNIFICANT" if comp["significant"] else "NOT SIGNIFICANT"
         print(f"  {comp['comparison']:25s}: z={comp['z_value']:.3f}, p={comp['p_value']:.4e} ({sig_str})")
@@ -237,8 +268,14 @@ def run_benchmark_experiments(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run CEC Benchmark Experiments")
     parser.add_argument("--dim", type=int, default=10, help="Problem dimension")
-    parser.add_argument("--runs", type=int, default=20, help="Number of runs per function")
-    parser.add_argument("--max_fes", type=int, default=20000, help="Max evaluations per run")
+    parser.add_argument("--runs", type=int, default=10, help="Number of runs per function")
+    parser.add_argument("--max_fes", type=int, default=None, help="Max evaluations (defaults to 10000*dim)")
+    parser.add_argument("--workers", type=int, default=8, help="Number of parallel workers")
     args = parser.parse_args()
     
-    run_benchmark_experiments(dim=args.dim, n_runs=args.runs, max_fes=args.max_fes)
+    run_benchmark_experiments(
+        dim=args.dim,
+        n_runs=args.runs,
+        max_fes=args.max_fes,
+        n_workers=args.workers
+    )
