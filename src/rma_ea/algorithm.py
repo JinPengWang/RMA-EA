@@ -80,7 +80,7 @@ class RMA_EA:
         pop_min: int = 4,
         p_best_rate: float = 0.11,
         arc_rate: float = 1.4,
-        memory_size: int = 20,
+        memory_size: int = 6,
         rank_k: Optional[int] = None,
         manifold_active: bool = True,
         landscape_active: bool = True,
@@ -237,6 +237,13 @@ class RMA_EA:
             equal_mask = trial_fitness == fitness_eval
             accept_mask = improved_mask | equal_mask
             
+            # Chart evaluation statistics for Bayesian conjugate update
+            n_rot_eval = int(np.sum(use_chart_eval))
+            n_rot_succ = int(np.sum(improved_mask & use_chart_eval))
+            n_can_eval = int(np.sum(~use_chart_eval))
+            n_can_succ = int(np.sum(improved_mask & (~use_chart_eval)))
+            chart_stats = (n_rot_eval, n_rot_succ, n_can_eval, n_can_succ)
+            
             # Update archive & Tri-Parameter Memory
             if np.any(improved_mask):
                 archive = np.vstack([archive, pop_eval[improved_mask]])
@@ -254,7 +261,8 @@ class RMA_EA:
                     successful_F=successful_F,
                     successful_Cr=successful_Cr,
                     fitness_improvements=fitness_improvements,
-                    successful_chart=successful_chart
+                    successful_chart=successful_chart,
+                    chart_stats=chart_stats
                 )
                 
             pop_eval[accept_mask] = trials_eval[accept_mask]
@@ -262,7 +270,7 @@ class RMA_EA:
             
             # 9. Linear Population Size Reduction (LPSR)
             if self.max_iter is not None:
-                progress = min(1.0, float(iteration) / (self.max_iter * 0.75))
+                progress = min(1.0, float(iteration) / self.max_iter)
             else:
                 progress = min(1.0, float(fes) / self.max_fes)
                 

@@ -178,7 +178,7 @@ class LSHADE:
                 
             # LPSR
             if self.max_iter is not None:
-                progress = min(1.0, float(iteration) / (self.max_iter * 0.75))
+                progress = min(1.0, float(iteration) / self.max_iter)
             else:
                 progress = min(1.0, float(fes) / self.max_fes)
                 

@@ -39,12 +39,12 @@ def repair_bounds(
 class ParameterMemory:
     """Historical parameter memory for scale factor F, crossover rate Cr, and chart selection."""
     
-    def __init__(self, memory_size: int = 20, init_F: float = 0.5, init_Cr: float = 0.5):
+    def __init__(self, memory_size: int = 6, init_F: float = 0.5, init_Cr: float = 0.5):
         self.memory_size = memory_size
         self.M_F = np.full(memory_size, init_F, dtype=np.float64)
         self.M_Cr = np.full(memory_size, init_Cr, dtype=np.float64)
-        # Multi-chart initialization: alternate exploratory and metric-focused slots
-        self.M_chart = np.array([0.9 if i % 2 == 0 else 0.1 for i in range(memory_size)], dtype=np.float64)
+        # Neutral Bernoulli prior across all historical memory slots
+        self.M_chart = np.full(memory_size, 0.5, dtype=np.float64)
         self.memory_ptr = 0
         
     def sample_parameters(
@@ -87,9 +87,10 @@ class ParameterMemory:
         successful_F: np.ndarray,
         successful_Cr: np.ndarray,
         fitness_improvements: np.ndarray,
-        successful_chart: Optional[np.ndarray] = None
+        successful_chart: Optional[np.ndarray] = None,
+        chart_stats: Optional[Tuple[int, int, int, int]] = None
     ) -> None:
-        """Update memory slots using Lehmer mean for F, weighted mean for Cr and chart."""
+        """Update memory slots using Lehmer mean for F, weighted mean for Cr, and Bayesian posterior for chart."""
         if len(successful_F) == 0:
             return
             
@@ -110,7 +111,14 @@ class ParameterMemory:
         self.M_F[self.memory_ptr] = float(np.clip(mean_L_F, 0.01, 1.0))
         self.M_Cr[self.memory_ptr] = float(np.clip(mean_A_Cr, 0.0, 1.0))
         
-        if successful_chart is not None and len(successful_chart) > 0:
+        # Bayesian Bernoulli conjugate posterior update for manifold chart selection
+        if chart_stats is not None:
+            n_rot_eval, n_rot_succ, n_can_eval, n_can_succ = chart_stats
+            r_rot = (n_rot_succ + 0.1) / (n_rot_eval + 0.2)
+            r_can = (n_can_succ + 0.1) / (n_can_eval + 0.2)
+            p_rot = r_rot / (r_rot + r_can)
+            self.M_chart[self.memory_ptr] = float(np.clip(p_rot, 0.1, 0.9))
+        elif successful_chart is not None and len(successful_chart) > 0:
             mean_chart = np.sum(weights * successful_chart.astype(float))
             self.M_chart[self.memory_ptr] = float(np.clip(mean_chart, 0.05, 0.95))
             
