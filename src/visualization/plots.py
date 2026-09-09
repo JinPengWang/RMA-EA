@@ -83,12 +83,12 @@ def plot_convergence_panels(
         
         for a_idx, algo in enumerate(algos):
             if algo in p_data:
-                fes = p_data[algo]["fes"]
+                x_axis = p_data[algo].get("iterations", p_data[algo].get("fes", []))
                 errs = np.array(p_data[algo]["errors"])
                 # Numerical clipping to avoid log(0)
                 errs = np.maximum(errs, 1e-16)
                 ax.plot(
-                    fes, errs,
+                    x_axis, errs,
                     label=algo,
                     color=COLOR_PALETTE.get(algo, "#333"),
                     linestyle=linestyles[a_idx],
@@ -97,7 +97,7 @@ def plot_convergence_panels(
                 
         ax.set_yscale("log")
         ax.set_title(f"({chr(97 + idx)}) {p_name.split(':')[0]}: {p_name.split(':')[1].strip()[:24]}", loc="left", fontweight="bold")
-        ax.set_xlabel("Function Evaluations (FES)")
+        ax.set_xlabel("Iterations ($t$)")
         ax.set_ylabel("Error: $f(\\mathbf{x}) - f^*$")
         ax.grid(True, linestyle="--", alpha=0.5)
         if idx == 0:

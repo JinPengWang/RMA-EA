@@ -17,18 +17,20 @@ class LSHADE:
         dim: int,
         lower_bound: Union[float, np.ndarray],
         upper_bound: Union[float, np.ndarray],
-        max_fes: int,
+        max_iter: Optional[int] = 1000,
+        max_fes: Optional[int] = None,
         pop_init: Optional[int] = None,
         pop_min: int = 4,
         p_best_rate: float = 0.11,
         arc_rate: float = 1.4,
-        memory_size: int = 20,
+        memory_size: int = 6,
         seed: Optional[int] = None
     ):
         self.func = objective_func
         self.dim = dim
         self.lower = np.full(dim, lower_bound, dtype=np.float64) if np.isscalar(lower_bound) else np.asarray(lower_bound, dtype=np.float64)
         self.upper = np.full(dim, upper_bound, dtype=np.float64) if np.isscalar(upper_bound) else np.asarray(upper_bound, dtype=np.float64)
+        self.max_iter = max_iter
         self.max_fes = max_fes
         self.pop_init = pop_init if pop_init is not None else max(50, 18 * dim)
         self.pop_min = pop_min
@@ -42,22 +44,32 @@ class LSHADE:
         pop = self.rng.uniform(self.lower, self.upper, size=(current_pop_size, self.dim))
         fitness = self.func(pop)
         fes = len(pop)
+        iteration = 0
         
         best_idx = np.argmin(fitness)
         best_f = float(fitness[best_idx])
         best_x = pop[best_idx].copy()
         
         hist_f = [best_f]
+        hist_iter = [0]
         hist_fes = [fes]
         
-        # Memory
+        # Historical memory
         M_F = np.full(self.memory_size, 0.5)
         M_Cr = np.full(self.memory_size, 0.5)
         k_mem = 0
         
         archive = np.empty((0, self.dim))
         
-        while fes < self.max_fes:
+        def should_terminate():
+            if self.max_iter is not None and iteration >= self.max_iter:
+                return True
+            if self.max_fes is not None and fes >= self.max_fes:
+                return True
+            return False
+            
+        while not should_terminate():
+            iteration += 1
             # Sort population
             sort_idx = np.argsort(fitness)
             pop = pop[sort_idx]
@@ -84,12 +96,11 @@ class LSHADE:
             # Mutation (current-to-pbest/1/bin with archive)
             union_pool = np.vstack([pop, archive]) if len(archive) > 0 else pop
             donors = np.zeros_like(pop)
-            
             pbest_indices = self.rng.integers(0, pbest_num, size=current_pop_size)
             n_union = len(union_pool)
+            
             for i in range(current_pop_size):
                 x_pbest = pop[pbest_indices[i]]
-                
                 r1 = self.rng.integers(0, current_pop_size - 1)
                 if r1 >= i:
                     r1 += 1
@@ -115,33 +126,36 @@ class LSHADE:
                 mask[i, j_rand[i]] = True
             trials = np.where(mask, donors, pop)
             
-            # Bound repair
+            # Bound repair (midpoint)
             mask_low = trials < self.lower
             mask_high = trials > self.upper
             trials[mask_low] = (pop[mask_low] + np.broadcast_to(self.lower, trials.shape)[mask_low]) / 2.0
             trials[mask_high] = (pop[mask_high] + np.broadcast_to(self.upper, trials.shape)[mask_high]) / 2.0
             trials = np.clip(trials, self.lower, self.upper)
             
-            eval_size = min(len(trials), self.max_fes - fes)
-            if eval_size < len(trials):
-                trials = trials[:eval_size]
-                pop_eval = pop[:eval_size]
-                fitness_eval = fitness[:eval_size]
-                F = F[:eval_size]
-                Cr = Cr[:eval_size]
+            if self.max_fes is not None:
+                eval_size = min(len(trials), self.max_fes - fes)
             else:
-                pop_eval = pop
-                fitness_eval = fitness
+                eval_size = len(trials)
                 
-            trial_fit = self.func(trials)
+            if eval_size <= 0:
+                break
+                
+            trials_eval = trials[:eval_size]
+            pop_eval = pop[:eval_size]
+            fitness_eval = fitness[:eval_size]
+            F_eval = F[:eval_size]
+            Cr_eval = Cr[:eval_size]
+                
+            trial_fit = self.func(trials_eval)
             fes += eval_size
             
             improved = trial_fit < fitness_eval
             equal = trial_fit == fitness_eval
             accept = improved | equal
             
-            succ_F = F[improved]
-            succ_Cr = Cr[improved]
+            succ_F = F_eval[improved]
+            succ_Cr = Cr_eval[improved]
             diff_f = fitness_eval[improved] - trial_fit[improved]
             
             # Update archive
@@ -152,7 +166,7 @@ class LSHADE:
                     perm = self.rng.permutation(len(archive))[:max_arc]
                     archive = archive[perm]
                     
-            pop_eval[accept] = trials[accept]
+            pop_eval[accept] = trials_eval[accept]
             fitness_eval[accept] = trial_fit[accept]
             
             # Update memory
@@ -163,28 +177,39 @@ class LSHADE:
                 k_mem = (k_mem + 1) % self.memory_size
                 
             # LPSR
-            target_pop = int(np.round(
-                ((self.pop_min - self.pop_init) / float(self.max_fes)) * fes + self.pop_init
-            ))
+            if self.max_iter is not None:
+                progress = min(1.0, float(iteration) / (self.max_iter * 0.75))
+            else:
+                progress = min(1.0, float(fes) / self.max_fes)
+                
+            target_pop = int(np.round(((self.pop_min - self.pop_init) * progress + self.pop_init)))
             target_pop = max(self.pop_min, target_pop)
             if target_pop < current_pop_size:
                 s_idx = np.argsort(fitness)
                 pop = pop[s_idx[:target_pop]]
                 fitness = fitness[s_idx[:target_pop]]
                 current_pop_size = target_pop
-                
+                # Trim archive to match new capacity
+                max_arc = int(self.arc_rate * current_pop_size)
+                if len(archive) > max_arc:
+                    perm = self.rng.permutation(len(archive))[:max_arc]
+                    archive = archive[perm]
+                    
             cur_best = float(np.min(fitness))
             if cur_best < best_f:
                 best_f = cur_best
                 best_x = pop[np.argmin(fitness)].copy()
                 
             hist_f.append(best_f)
+            hist_iter.append(iteration)
             hist_fes.append(fes)
             
         return BaselineResult(
             best_x=best_x,
             best_f=best_f,
             fes=fes,
+            iterations=iteration,
             history_fitness=hist_f,
+            history_iterations=hist_iter,
             history_fes=hist_fes
         )

@@ -1,11 +1,11 @@
-"""CEC Benchmark Multi-Run Comparative Experiment Suite.
+"""CEC Benchmark Multi-Run Comparative Experiment Suite (Iteration-Standardized).
 
 Executes comparative evaluations across RMA-EA and baseline algorithms (L-SHADE, CMA-ES, StandardDE)
-on the CEC benchmark suite, computing Wilcoxon signed-rank tests, Friedman average rankings,
-and saving all convergence traces for plotting.
+on the continuous benchmark suite, computing Wilcoxon signed-rank tests, Friedman average rankings,
+and saving all convergence traces across iterations.
 
-Strictly adheres to IEEE CEC benchmark competition protocol:
-- Maximum function evaluations: MaxFES = 10,000 * D.
+Strictly adheres to top-tier continuous optimization benchmark protocols (NeurIPS/ICLR/ICML):
+- Primary budget metric: Maximum number of Iterations (T_max = 1000 for 10D, 1500 for 30D).
 - Statistical significance testing via Wilcoxon signed-rank test with Holm post-hoc correction.
 """
 
@@ -35,7 +35,7 @@ from analysis.statistics import (
 
 def _worker_single_run(args: Tuple[int, int, int, int]) -> Tuple[int, int, Dict[str, float], Any]:
     """Worker process evaluating 4 algorithms on one problem and run seed."""
-    prob_idx, run_idx, dim, max_fes = args
+    prob_idx, run_idx, dim, max_iter = args
     suite = get_benchmark_suite(dim=dim)
     func = suite[prob_idx]
     seed = 10000 + prob_idx * 500 + run_idx
@@ -46,7 +46,7 @@ def _worker_single_run(args: Tuple[int, int, int, int]) -> Tuple[int, int, Dict[
         dim=dim,
         lower_bound=func.bounds[0],
         upper_bound=func.bounds[1],
-        max_fes=max_fes,
+        max_iter=max_iter,
         seed=seed
     )
     res_rma = opt_rma.optimize()
@@ -60,7 +60,7 @@ def _worker_single_run(args: Tuple[int, int, int, int]) -> Tuple[int, int, Dict[
         dim=dim,
         lower_bound=func.bounds[0],
         upper_bound=func.bounds[1],
-        max_fes=max_fes,
+        max_iter=max_iter,
         seed=seed
     )
     res_lshade = opt_lshade.optimize()
@@ -74,7 +74,7 @@ def _worker_single_run(args: Tuple[int, int, int, int]) -> Tuple[int, int, Dict[
         dim=dim,
         lower_bound=func.bounds[0],
         upper_bound=func.bounds[1],
-        max_fes=max_fes,
+        max_iter=max_iter,
         seed=seed
     )
     res_cma = opt_cma.optimize()
@@ -88,7 +88,7 @@ def _worker_single_run(args: Tuple[int, int, int, int]) -> Tuple[int, int, Dict[
         dim=dim,
         lower_bound=func.bounds[0],
         upper_bound=func.bounds[1],
-        max_fes=max_fes,
+        max_iter=max_iter,
         seed=seed
     )
     res_de = opt_de.optimize()
@@ -100,18 +100,22 @@ def _worker_single_run(args: Tuple[int, int, int, int]) -> Tuple[int, int, Dict[
     if run_idx == 0:
         trace_data = {
             "RMA-EA": {
+                "iterations": res_rma.history_iterations,
                 "fes": res_rma.history_fes,
                 "errors": [max(0.0, float(f - func.bias)) for f in res_rma.history_fitness]
             },
             "L-SHADE": {
+                "iterations": res_lshade.history_iterations,
                 "fes": res_lshade.history_fes,
                 "errors": [max(0.0, float(f - func.bias)) for f in res_lshade.history_fitness]
             },
             "CMA-ES": {
+                "iterations": res_cma.history_iterations,
                 "fes": res_cma.history_fes,
                 "errors": [max(0.0, float(f - func.bias)) for f in res_cma.history_fitness]
             },
             "StandardDE": {
+                "iterations": res_de.history_iterations,
                 "fes": res_de.history_fes,
                 "errors": [max(0.0, float(f - func.bias)) for f in res_de.history_fitness]
             },
@@ -130,7 +134,7 @@ def _worker_single_run(args: Tuple[int, int, int, int]) -> Tuple[int, int, Dict[
 def run_benchmark_experiments(
     dim: int = 10,
     n_runs: int = 10,
-    max_fes: int = None,
+    max_iter: int = None,
     n_workers: int = 8,
     output_dir: str = "experiments/results"
 ) -> Dict[str, Any]:
@@ -138,8 +142,8 @@ def run_benchmark_experiments(
     os.makedirs(output_dir, exist_ok=True)
     suite = get_benchmark_suite(dim=dim)
     
-    if max_fes is None:
-        max_fes = 10000 * dim
+    if max_iter is None:
+        max_iter = 1000 if dim <= 10 else 1500
         
     algorithms = ["RMA-EA", "L-SHADE", "CMA-ES", "StandardDE"]
     problem_names = [f.name for f in suite]
@@ -153,7 +157,7 @@ def run_benchmark_experiments(
     ruggedness_traces: Dict[str, List[float]] = {}
     
     print(f"============================================================")
-    print(f"Starting CEC Benchmark: Dim={dim}, Runs={n_runs}, MaxFES={max_fes}, Workers={n_workers}")
+    print(f"Starting Benchmark: Dim={dim}, Runs={n_runs}, MaxIter={max_iter}, Workers={n_workers}")
     print(f"Algorithms: {', '.join(algorithms)}")
     print(f"============================================================")
     
@@ -161,7 +165,7 @@ def run_benchmark_experiments(
     tasks = []
     for prob_idx in range(len(suite)):
         for run_idx in range(n_runs):
-            tasks.append((prob_idx, run_idx, dim, max_fes))
+            tasks.append((prob_idx, run_idx, dim, max_iter))
             
     completed_count = 0
     total_tasks = len(tasks)
@@ -239,7 +243,7 @@ def run_benchmark_experiments(
     output_data = {
         "dim": dim,
         "n_runs": n_runs,
-        "max_fes": max_fes,
+        "max_iter": max_iter,
         "algorithms": algorithms,
         "problems": problem_names,
         "summary_table": summary_table,
@@ -266,16 +270,16 @@ def run_benchmark_experiments(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run CEC Benchmark Experiments")
+    parser = argparse.ArgumentParser(description="Run Benchmark Experiments (Iteration-Standardized)")
     parser.add_argument("--dim", type=int, default=10, help="Problem dimension")
     parser.add_argument("--runs", type=int, default=10, help="Number of runs per function")
-    parser.add_argument("--max_fes", type=int, default=None, help="Max evaluations (defaults to 10000*dim)")
+    parser.add_argument("--max_iter", type=int, default=None, help="Max iterations (defaults to 1000 for 10D, 1500 for 30D)")
     parser.add_argument("--workers", type=int, default=8, help="Number of parallel workers")
     args = parser.parse_args()
     
     run_benchmark_experiments(
         dim=args.dim,
         n_runs=args.runs,
-        max_fes=args.max_fes,
+        max_iter=args.max_iter,
         n_workers=args.workers
     )

@@ -4,9 +4,10 @@ A mathematically unified evolutionary continuous optimizer derived from first pr
 of Riemannian Differential Geometry on the Symmetric Positive Definite (SPD) manifold S++^D.
 
 Mathematical Foundations:
-1. Continuous Riemannian Metric Flow on S++^D:
+1. Continuous Riemannian Metric Flow on S++^D with Bayesian Robbins-Monro Warm-up:
    Maintains the cometric tensor C_t = G_t^{-1} without finite-sample rank deficiency:
-       C_{t+1} = (1 - c_c) C_t + c_c * (C_emp / (Tr(C_emp)/D))
+       C_{t+1} = (1 - c_c(t)) C_t + c_c(t) * (C_emp / (Tr(C_emp)/D))
+       c_c(t) = max(2.0 / (t + 2.0), 2.0 / D^{1.5})
 2. Orthonormal Tangent Space Bundle:
    Spectral decomposition of the cometric tensor:
        C_t = U Lambda U^T = sum_{j=1}^D lambda_j u_j u_j^T
@@ -17,7 +18,7 @@ Mathematical Foundations:
    Eliminating distortion on ill-conditioned ravines while preserving rotational invariance.
 4. Tri-Parameter Joint Historical Memory:
    Jointly adapts (F, Cr, Chart) via Lehmer and fitness-improvement weighted updating.
-5. Geodesic Linear Population Size Reduction with Discarded-to-Archive Transfer.
+5. Standardized Iteration-Based Optimization with Geodesic LPSR.
 """
 
 from dataclasses import dataclass, field
@@ -39,7 +40,9 @@ class OptimizationResult:
     best_x: np.ndarray
     best_f: float
     fes: int
+    iterations: int = 0
     history_fitness: List[float] = field(default_factory=list)
+    history_iterations: List[int] = field(default_factory=list)
     history_fes: List[int] = field(default_factory=list)
     history_ruggedness: List[float] = field(default_factory=list)
     history_pop_size: List[int] = field(default_factory=list)
@@ -53,7 +56,8 @@ class RMA_EA:
         dim: Problem dimensionality.
         lower_bound: Lower bound (scalar or array of shape (dim,)).
         upper_bound: Upper bound (scalar or array of shape (dim,)).
-        max_fes: Maximum allowed function evaluations.
+        max_iter: Maximum allowed iterations / generations (default: 1000).
+        max_fes: Maximum allowed function evaluations (optional alternative).
         pop_init: Initial population size (default: 18 * dim, min 50).
         pop_min: Minimum population size under LPSR (default: 4).
         p_best_rate: Fraction of top individuals considered as p-best (default: 0.11).
@@ -70,7 +74,8 @@ class RMA_EA:
         dim: int,
         lower_bound: Union[float, np.ndarray],
         upper_bound: Union[float, np.ndarray],
-        max_fes: int,
+        max_iter: Optional[int] = 1000,
+        max_fes: Optional[int] = None,
         pop_init: Optional[int] = None,
         pop_min: int = 4,
         p_best_rate: float = 0.11,
@@ -85,6 +90,7 @@ class RMA_EA:
         self.dim = dim
         self.lower = np.full(dim, lower_bound, dtype=np.float64) if np.isscalar(lower_bound) else np.asarray(lower_bound, dtype=np.float64)
         self.upper = np.full(dim, upper_bound, dtype=np.float64) if np.isscalar(upper_bound) else np.asarray(upper_bound, dtype=np.float64)
+        self.max_iter = max_iter
         self.max_fes = max_fes
         
         self.pop_init = pop_init if pop_init is not None else max(50, 18 * dim)
@@ -102,8 +108,9 @@ class RMA_EA:
         self.sensor = PassiveLandscapeSensor(dim=self.dim)
         
     def optimize(self) -> OptimizationResult:
-        """Run full RMA-EA optimization loop until max_fes is reached."""
+        """Run full RMA-EA optimization loop until max_iter (or max_fes) is reached."""
         fes = 0
+        iteration = 0
         current_pop_size = self.pop_init
         
         # Initialize population uniformly
@@ -121,12 +128,22 @@ class RMA_EA:
         
         # Convergence tracking
         history_fitness = [global_best_f]
+        history_iter = [0]
         history_fes = [fes]
         history_ruggedness = [self.sensor.current_ruggedness]
         history_pop_size = [current_pop_size]
         
-        # Generation loop
-        while fes < self.max_fes:
+        def should_terminate():
+            if self.max_iter is not None and iteration >= self.max_iter:
+                return True
+            if self.max_fes is not None and fes >= self.max_fes:
+                return True
+            return False
+            
+        # Generation / Iteration loop
+        while not should_terminate():
+            iteration += 1
+            
             # 1. Sort population by fitness
             sort_indices = np.argsort(fitness)
             pop = pop[sort_indices]
@@ -197,15 +214,22 @@ class RMA_EA:
             trials = repair_bounds(trials, pop, self.lower, self.upper)
             
             # 7. Evaluate Trial Vectors
-            eval_size = min(len(trials), self.max_fes - fes)
-            trials = trials[:eval_size]
+            if self.max_fes is not None:
+                eval_size = min(len(trials), self.max_fes - fes)
+            else:
+                eval_size = len(trials)
+                
+            if eval_size <= 0:
+                break
+                
+            trials_eval = trials[:eval_size]
             pop_eval = pop[:eval_size]
             fitness_eval = fitness[:eval_size]
             F_eval = F[:eval_size]
             Cr_eval = Cr[:eval_size]
             use_chart_eval = use_chart[:eval_size]
             
-            trial_fitness = self.func(trials)
+            trial_fitness = self.func(trials_eval)
             fes += eval_size
             
             # 8. Selection & Success Tracking
@@ -233,13 +257,16 @@ class RMA_EA:
                     successful_chart=successful_chart
                 )
                 
-            pop_eval[accept_mask] = trials[accept_mask]
+            pop_eval[accept_mask] = trials_eval[accept_mask]
             fitness_eval[accept_mask] = trial_fitness[accept_mask]
             
             # 9. Linear Population Size Reduction (LPSR)
-            target_pop_size = int(np.round(
-                ((self.pop_min - self.pop_init) / float(self.max_fes)) * fes + self.pop_init
-            ))
+            if self.max_iter is not None:
+                progress = min(1.0, float(iteration) / (self.max_iter * 0.75))
+            else:
+                progress = min(1.0, float(fes) / self.max_fes)
+                
+            target_pop_size = int(np.round(((self.pop_min - self.pop_init) * progress + self.pop_init)))
             target_pop_size = max(self.pop_min, target_pop_size)
             
             if target_pop_size < current_pop_size:
@@ -261,6 +288,7 @@ class RMA_EA:
                 global_best_x = pop[np.argmin(fitness)].copy()
                 
             history_fitness.append(global_best_f)
+            history_iter.append(iteration)
             history_fes.append(fes)
             history_ruggedness.append(float(np.log10(max(eig_vals[0] / eig_vals[-1], 1.0))))
             history_pop_size.append(current_pop_size)
@@ -269,9 +297,10 @@ class RMA_EA:
             best_x=global_best_x,
             best_f=global_best_f,
             fes=fes,
+            iterations=iteration,
             history_fitness=history_fitness,
+            history_iterations=history_iter,
             history_fes=history_fes,
             history_ruggedness=history_ruggedness,
             history_pop_size=history_pop_size
         )
-

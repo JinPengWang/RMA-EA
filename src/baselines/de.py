@@ -10,12 +10,14 @@ class BaselineResult:
     best_x: np.ndarray
     best_f: float
     fes: int
+    iterations: int = 0
     history_fitness: List[float] = field(default_factory=list)
+    history_iterations: List[int] = field(default_factory=list)
     history_fes: List[int] = field(default_factory=list)
 
 
 class StandardDE:
-    """Standard DE/rand/1/bin baseline optimizer."""
+    """Standard DE/rand/1/bin baseline optimizer (Storn & Price, 1997)."""
     
     def __init__(
         self,
@@ -23,7 +25,8 @@ class StandardDE:
         dim: int,
         lower_bound: Union[float, np.ndarray],
         upper_bound: Union[float, np.ndarray],
-        max_fes: int,
+        max_iter: Optional[int] = 1000,
+        max_fes: Optional[int] = None,
         pop_size: int = 100,
         F: float = 0.5,
         Cr: float = 0.9,
@@ -33,6 +36,7 @@ class StandardDE:
         self.dim = dim
         self.lower = np.full(dim, lower_bound, dtype=np.float64) if np.isscalar(lower_bound) else np.asarray(lower_bound, dtype=np.float64)
         self.upper = np.full(dim, upper_bound, dtype=np.float64) if np.isscalar(upper_bound) else np.asarray(upper_bound, dtype=np.float64)
+        self.max_iter = max_iter
         self.max_fes = max_fes
         self.pop_size = pop_size
         self.F = F
@@ -43,15 +47,25 @@ class StandardDE:
         pop = self.rng.uniform(self.lower, self.upper, size=(self.pop_size, self.dim))
         fitness = self.func(pop)
         fes = len(pop)
+        iteration = 0
         
         best_idx = np.argmin(fitness)
         best_f = float(fitness[best_idx])
         best_x = pop[best_idx].copy()
         
         hist_f = [best_f]
+        hist_iter = [0]
         hist_fes = [fes]
         
-        while fes < self.max_fes:
+        def should_terminate():
+            if self.max_iter is not None and iteration >= self.max_iter:
+                return True
+            if self.max_fes is not None and fes >= self.max_fes:
+                return True
+            return False
+            
+        while not should_terminate():
+            iteration += 1
             donors = np.zeros_like(pop)
             for i in range(self.pop_size):
                 idxs = [j for j in range(self.pop_size) if j != i]
@@ -74,20 +88,23 @@ class StandardDE:
             trials[mask_high] = (pop[mask_high] + np.broadcast_to(self.upper, trials.shape)[mask_high]) / 2.0
             trials = np.clip(trials, self.lower, self.upper)
             
-            eval_size = min(len(trials), self.max_fes - fes)
-            if eval_size < len(trials):
-                trials = trials[:eval_size]
-                pop_eval = pop[:eval_size]
-                fitness_eval = fitness[:eval_size]
+            if self.max_fes is not None:
+                eval_size = min(len(trials), self.max_fes - fes)
             else:
-                pop_eval = pop
-                fitness_eval = fitness
+                eval_size = len(trials)
                 
-            trial_fit = self.func(trials)
+            if eval_size <= 0:
+                break
+                
+            trials_eval = trials[:eval_size]
+            pop_eval = pop[:eval_size]
+            fitness_eval = fitness[:eval_size]
+                
+            trial_fit = self.func(trials_eval)
             fes += eval_size
             
             accept = trial_fit <= fitness_eval
-            pop_eval[accept] = trials[accept]
+            pop_eval[accept] = trials_eval[accept]
             fitness_eval[accept] = trial_fit[accept]
             
             cur_best = float(np.min(fitness))
@@ -96,12 +113,15 @@ class StandardDE:
                 best_x = pop[np.argmin(fitness)].copy()
                 
             hist_f.append(best_f)
+            hist_iter.append(iteration)
             hist_fes.append(fes)
             
         return BaselineResult(
             best_x=best_x,
             best_f=best_f,
             fes=fes,
+            iterations=iteration,
             history_fitness=hist_f,
+            history_iterations=hist_iter,
             history_fes=hist_fes
         )

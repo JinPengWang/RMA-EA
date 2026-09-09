@@ -17,7 +17,8 @@ class CMAES:
         dim: int,
         lower_bound: Union[float, np.ndarray],
         upper_bound: Union[float, np.ndarray],
-        max_fes: int,
+        max_iter: Optional[int] = 1000,
+        max_fes: Optional[int] = None,
         sigma0: Optional[float] = None,
         seed: Optional[int] = None
     ):
@@ -25,11 +26,12 @@ class CMAES:
         self.dim = dim
         self.lower = np.full(dim, lower_bound, dtype=np.float64) if np.isscalar(lower_bound) else np.asarray(lower_bound, dtype=np.float64)
         self.upper = np.full(dim, upper_bound, dtype=np.float64) if np.isscalar(upper_bound) else np.asarray(upper_bound, dtype=np.float64)
+        self.max_iter = max_iter
         self.max_fes = max_fes
         self.rng = np.random.default_rng(seed)
         
-        # Strategy parameters
-        self.xmean = (self.lower + self.upper) / 2.0
+        # Strategy parameters - unbiased uniform initialization
+        self.xmean = self.rng.uniform(self.lower, self.upper)
         self.sigma = sigma0 if sigma0 is not None else float(np.mean(self.upper - self.lower) * 0.3)
         
         # Population parameters
@@ -57,16 +59,25 @@ class CMAES:
         
     def optimize(self) -> BaselineResult:
         fes = 0
+        iteration = 0
         best_f = float("inf")
         best_x = self.xmean.copy()
         
         hist_f = []
+        hist_iter = []
         hist_fes = []
         
-        while fes < self.max_fes:
+        def should_terminate():
+            if self.max_iter is not None and iteration >= self.max_iter:
+                return True
+            if self.max_fes is not None and fes >= self.max_fes:
+                return True
+            return False
+            
+        while not should_terminate():
+            iteration += 1
             # Generate lambda offspring
             z = self.rng.standard_normal((self.lam, self.dim))
-            # x = m + sigma * B * D * z
             y = z * self.D
             artmp = y @ self.B.T
             arx = self.xmean + self.sigma * artmp
@@ -74,18 +85,19 @@ class CMAES:
             # Boundary handling: clip
             arx_clipped = np.clip(arx, self.lower, self.upper)
             
-            # Budget check
-            eval_size = min(self.lam, self.max_fes - fes)
-            if eval_size < self.lam:
-                arx_eval = arx_clipped[:eval_size]
+            if self.max_fes is not None:
+                eval_size = min(self.lam, self.max_fes - fes)
             else:
-                arx_eval = arx_clipped
+                eval_size = self.lam
                 
+            if eval_size <= 0:
+                break
+                
+            arx_eval = arx_clipped[:eval_size]
             fitness = self.func(arx_eval)
             fes += eval_size
             
             if eval_size < self.lam:
-                # Pad to maintain CMA update dimensions if at budget boundary
                 pad_size = self.lam - eval_size
                 fitness = np.concatenate([fitness, np.full(pad_size, float("inf"))])
                 
@@ -97,23 +109,19 @@ class CMAES:
                 best_x = arx_clipped[sort_idx[0]].copy()
                 
             hist_f.append(best_f)
+            hist_iter.append(iteration)
             hist_fes.append(fes)
             
-            if fes >= self.max_fes:
-                break
-                
             # Selection and recombination
             xold = self.xmean.copy()
             self.xmean = np.sum(arx[sort_idx[:self.mu]] * self.weights[:, np.newaxis], axis=0)
             
             # Evolution paths
-            # y_w = (xmean - xold) / sigma
             y_w = (self.xmean - xold) / (self.sigma + 1e-12)
-            # inv_sqrt_C * y_w = B * D^-1 * B.T * y_w
             z_w = self.B @ ((self.B.T @ y_w) / self.D)
             
             self.ps = (1 - self.cs) * self.ps + np.sqrt(self.cs * (2 - self.cs) * self.mueff) * z_w
-            denom_hsig = np.sqrt(max(1e-12, 1.0 - (1.0 - self.cs)**(2.0 * (fes / self.lam)))) * self.chiN
+            denom_hsig = np.sqrt(max(1e-12, 1.0 - (1.0 - self.cs)**(2.0 * max(1, iteration)))) * self.chiN
             hsig = 1.0 if (np.linalg.norm(self.ps) / denom_hsig) < (1.4 + 2.0 / (self.dim + 1)) else 0.0
             
             self.pc = (1 - self.cc) * self.pc + hsig * np.sqrt(self.cc * (2 - self.cc) * self.mueff) * y_w
@@ -142,6 +150,8 @@ class CMAES:
             best_x=best_x,
             best_f=best_f,
             fes=fes,
+            iterations=iteration,
             history_fitness=hist_f,
+            history_iterations=hist_iter,
             history_fes=hist_fes
         )
