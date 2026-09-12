@@ -167,7 +167,7 @@ If you use this code in your research, please cite:
   version   = {3.4},
   year      = {2026},
   publisher = {GitHub},
-  url       = {https://github.com/<your-account>/RMA-EA}
+  url       = {https://github.com/JinPengWang/RMA-EA}
 }
 ```
 
