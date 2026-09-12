@@ -75,24 +75,26 @@ Let $C_t = G_t^{-1}$ denote the online cometric estimated from the elite sample 
 
 ### Development setup (recommended)
 
-The repository ships with **no global installs**. Everything lives in a project-local `.venv/` so your base Python is never touched.
+The repository ships with **no global installs**. Everything lives in a project-local virtual environment named `rma_ea/`, so your base Python is never touched.
 
 ```bash
-# Create the venv from any Python 3.10+ (the in-tree .venv/ is git-ignored).
-python -m venv .venv
+# Create the venv from any Python 3.10+ (git-ignored, see .gitignore).
+python -m venv rma_ea
 
 # Activate it.  Windows PowerShell:
-.venv\Scripts\Activate.ps1
+rma_ea\Scripts\Activate.ps1
 # Windows cmd / Git Bash:
-source .venv/Scripts/activate
+source rma_ea/Scripts/activate
 # macOS / Linux:
-source .venv/bin/activate
+source rma_ea/bin/activate
 
 # Install the project in editable mode together with the runtime + dev deps.
 pip install -e ".[dev]"
 ```
 
 The `-e` flag means editing any file under `src/` is picked up immediately; no rebuild step is required.
+
+> **Naming note.** The virtual environment is called `rma_ea`, the same name as the source package `src/rma_ea/`. This is safe because `.gitignore` anchors the ignore rule as `/rma_ea/` (with a leading slash) — the bare pattern `rma_ea/` would also match `src/rma_ea/` and silently drop the source package from version control. At import time the regular package `src/rma_ea/` (which has `__init__.py`) always takes precedence over the venv directory, which is only a namespace package.
 
 ### Run Unit Tests
 ```bash

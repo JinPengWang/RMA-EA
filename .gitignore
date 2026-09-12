@@ -14,6 +14,11 @@ venv/
 build/
 dist/
 
+# Project-local virtual environment.  Anchored at the repository root with a
+# leading slash: the bare pattern `rma_ea/` would also match src/rma_ea/ and
+# silently drop the source package from version control.
+/rma_ea/
+
 # WorkBuddy internal workspace data (session logs, memory) -- never publish
 .workbuddy/
 
