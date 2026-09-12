@@ -1,7 +1,16 @@
 {
-  // Point the Python extension at the project-local venv `rma_ea/`.
-  // ${workspaceFolder} keeps this portable across machines.
+  // The venv is named "rma_ea", which is NOT one of the folder names VS Code
+  // auto-discovers (.venv / venv / env).  It must therefore be registered
+  // explicitly here, and trusted by the Jupyter extension, or the kernel will
+  // never appear in the notebook kernel picker.
+  // ${workspaceFolder} keeps every path below portable across machines.
   "python.defaultInterpreterPath": "${workspaceFolder}/rma_ea/Scripts/python.exe",
+
+  // Required for the Jupyter extension to accept a kernelspec whose
+  // interpreter lives in a non-standard venv directory.
+  "jupyter.kernels.trusted": [
+    "${workspaceFolder}/rma_ea/Scripts/python.exe"
+  ],
 
   // Auto-activate the venv in new integrated terminals.
   "python.terminal.activateEnvironment": true,
@@ -11,7 +20,12 @@
   "python.testing.unittestEnabled": false,
   "python.testing.pytestArgs": ["tests"],
 
-  // Keep the venv and its caches out of the editor's file watcher and search.
+  // Let Pylance resolve the editable-installed package.
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/src"
+  ],
+
+  // Keep the venv and its caches out of the file watcher and search.
   "files.watcherExclude": {
     "**/rma_ea/**": true
   },
