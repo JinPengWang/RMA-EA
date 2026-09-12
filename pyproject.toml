@@ -20,7 +20,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.3.0",
-    "pytest-cov>=4.1.0"
+    "pytest-cov>=4.1.0",
+    # Required so VS Code / Jupyter can start a kernel from this environment.
+    # Without it the venv is invisible in the notebook kernel picker.
+    "ipykernel>=6.25.0"
 ]
 
 [tool.pytest.ini_options]

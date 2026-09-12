@@ -1,0 +1,21 @@
+{
+  // Point the Python extension at the project-local venv `rma_ea/`.
+  // ${workspaceFolder} keeps this portable across machines.
+  "python.defaultInterpreterPath": "${workspaceFolder}/rma_ea/Scripts/python.exe",
+
+  // Auto-activate the venv in new integrated terminals.
+  "python.terminal.activateEnvironment": true,
+
+  // Run the test suite with pytest from the same environment.
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": ["tests"],
+
+  // Keep the venv and its caches out of the editor's file watcher and search.
+  "files.watcherExclude": {
+    "**/rma_ea/**": true
+  },
+  "search.exclude": {
+    "**/rma_ea/**": true
+  }
+}

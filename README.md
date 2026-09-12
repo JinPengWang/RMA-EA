@@ -94,6 +94,18 @@ pip install -e ".[dev]"
 
 The `-e` flag means editing any file under `src/` is picked up immediately; no rebuild step is required.
 
+#### Using the walk-through notebook
+
+`pip install -e ".[dev]"` pulls in `ipykernel`, which is what VS Code and Jupyter need to start a kernel. To make the environment show up in VS Code's kernel picker, register it once:
+
+```bash
+python -m ipykernel install --user --name rma_ea --display-name "RMA-EA (rma_ea venv, Python 3.13)"
+```
+
+Then open `docs/rma_ea_walkthrough.ipynb` and pick **"RMA-EA (rma_ea venv, Python 3.13)"** from the kernel selector (top-right). If it does not appear, run *Python: Clear Cache and Reload Window* from the command palette.
+
+> **Why this step exists.** A bare `python -m venv` contains no `ipykernel`, so the environment exists on disk but cannot serve a notebook kernel — VS Code will not list it. Installing `ipykernel` and registering a kernelspec is what makes it discoverable.
+
 > **Naming note.** The virtual environment is called `rma_ea`, the same name as the source package `src/rma_ea/`. This is safe because `.gitignore` anchors the ignore rule as `/rma_ea/` (with a leading slash) — the bare pattern `rma_ea/` would also match `src/rma_ea/` and silently drop the source package from version control. At import time the regular package `src/rma_ea/` (which has `__init__.py`) always takes precedence over the venv directory, which is only a namespace package.
 
 ### Run Unit Tests
