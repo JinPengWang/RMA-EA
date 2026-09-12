@@ -37,35 +37,49 @@ def repair_bounds(
 
 
 class ParameterMemory:
-    """Riemannian Atlas Parameter Memory for Canonical & Tangent Charts.
-    
+    """Riemannian Atlas Parameter Memory with Operator-Decoupled Posteriors.
+
     In Riemannian Differential Geometry, a manifold atlas A = {(U_alpha, phi_alpha)}
     consists of coordinate charts with distinct characteristic velocities.
     This class maintains chart-specific historical memory:
         Chart 0 (Canonical Euclidean chart phi_0): (M_F_can, M_Cr_can)
         Chart 1 (Riemannian Principal Tangent chart phi_1): (M_F_rot, M_Cr_rot)
     Eliminates parameter cross-contamination across coordinate charts.
-    Chart selection is governed by a smooth Bayesian conjugate posterior:
-        p_rot <- (1 - c_chart) * p_rot + c_chart * (r_rot / (r_rot + r_can))
-        c_chart = 1 / H
+
+    The two operators that consume the atlas receive SEPARATE Bayesian chart
+    posteriors, each credited by the signal appropriate to its role:
+    1. Crossover chart posterior p_rot (mode selection quality):
+       success-count credit, Laplace-regularized survival rate.
+           r_rot = (n_rot_succ + 0.1) / (n_rot_eval + 0.2)
+           p_rot <- (1 - c_chart) p_rot + c_chart r_rot / (r_rot + r_can)
+    2. Diffusion chart posterior p_diff (exploration productivity):
+       improvement-MASS credit per evaluation. The target is a ratio of same
+       units and therefore scale-invariant across problems; it demotes the
+       geodesic diffusion exactly where it yields no displacement quality
+       (smooth blocks of hybrid landscapes) and promotes it where hops
+       deliver large improvements (multimodal basins).
+           r_diff = d_diff / (n_diff_eval + 1)
+           p_diff <- (1 - c_chart) p_diff + c_chart r_diff / (r_diff + r_can)
+    Both smoothing rates equal c_chart = 1 / H.
     """
     def __init__(self, memory_size: int = 6, init_F: float = 0.5, init_Cr: float = 0.5):
         self.memory_size = memory_size
         self.c_chart = 1.0 / float(memory_size)
-        
+
         # Chart 0: Canonical coordinate chart memory
         self.M_F_can = np.full(memory_size, init_F, dtype=np.float64)
         self.M_Cr_can = np.full(memory_size, init_Cr, dtype=np.float64)
         self.ptr_can = 0
-        
+
         # Chart 1: Riemannian principal tangent chart memory
         self.M_F_rot = np.full(memory_size, init_F, dtype=np.float64)
         self.M_Cr_rot = np.full(memory_size, init_Cr, dtype=np.float64)
         self.ptr_rot = 0
-        
-        # Smooth Bayesian chart transition probability
-        self.p_rot = 0.5
-        
+
+        # Operator-decoupled Bayesian chart posteriors
+        self.p_rot = 0.5    # crossover chart (count credit)
+        self.p_diff = 0.5  # diffusion mutation chart (mass credit)
+
         # Backward-compatibility properties
         self.M_F = self.M_F_can
         self.M_Cr = self.M_Cr_can
@@ -77,12 +91,18 @@ class ParameterMemory:
         size: int,
         rng: Optional[np.random.Generator] = None,
         return_chart: bool = False
-    ) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-        """Sample chart-specific F and Cr parameters according to the Riemannian atlas."""
+    ) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+        """Sample chart-specific F and Cr parameters according to the Riemannian atlas.
+
+        Returns (with return_chart=True) the crossover-chart mask and the
+        diffusion-chart mask, drawn independently from their respective
+        operator posteriors p_rot and p_diff.
+        """
         if rng is None:
             rng = np.random.default_rng()
-            
+
         use_chart = rng.random(size) < self.p_rot
+        use_diff = rng.random(size) < self.p_diff
         F = np.zeros(size, dtype=np.float64)
         Cr = np.zeros(size, dtype=np.float64)
         slot_indices = np.zeros(size, dtype=int)
@@ -120,7 +140,7 @@ class ParameterMemory:
             Cr[idx_rot] = np.clip(self.M_Cr_rot[r_r] + 0.1 * rng.standard_normal(len(idx_rot)), 0.0, 1.0)
             
         if return_chart:
-            return F, Cr, use_chart, slot_indices
+            return F, Cr, use_chart, use_diff, slot_indices
         return F, Cr
         
     def update_memory(
@@ -129,9 +149,17 @@ class ParameterMemory:
         successful_Cr: np.ndarray,
         fitness_improvements: np.ndarray,
         successful_chart: Optional[np.ndarray] = None,
-        chart_stats: Optional[Tuple[int, int, int, int]] = None
+        chart_stats: Optional[Tuple[int, int, int, int]] = None,
+        diff_stats: Optional[Tuple[int, int, float, float]] = None
     ) -> None:
-        """Update chart-specific memory slots and smooth Bayesian transition posterior."""
+        """Update chart-specific memory slots and the two chart posteriors.
+
+        Args:
+            chart_stats: (n_rot_eval, n_rot_succ, n_can_eval, n_can_succ) --
+                crossover-chart survival counts for the count-credit posterior.
+            diff_stats: (n_diff_eval, n_can_eval, d_diff, d_can) -- evaluation
+                counts and improvement masses for the mass-credit posterior.
+        """
         if len(successful_F) == 0:
             return
             
@@ -173,14 +201,31 @@ class ParameterMemory:
             self.M_Cr_can[self.ptr_can] = float(np.clip(mean_A_Cr, 0.0, 1.0))
             self.ptr_can = (self.ptr_can + 1) % self.memory_size
 
-        # Smooth Bayesian chart posterior update
+        # Crossover chart posterior: count credit (mode-selection quality)
         if chart_stats is not None:
             n_rot_eval, n_rot_succ, n_can_eval, n_can_succ = chart_stats
             r_rot = (n_rot_succ + 0.1) / (n_rot_eval + 0.2)
             r_can = (n_can_succ + 0.1) / (n_can_eval + 0.2)
             target_p = r_rot / (r_rot + r_can)
-            self.p_rot = float(np.clip((1.0 - self.c_chart) * self.p_rot + self.c_chart * target_p, 0.05, 0.95))
+            self.p_rot = float(np.clip(
+                (1.0 - self.c_chart) * self.p_rot + self.c_chart * target_p,
+                0.05, 0.95
+            ))
             self.M_chart[:] = self.p_rot
+
+        # Diffusion chart posterior: improvement-mass credit per evaluation.
+        # The target is a ratio of same units, hence scale-invariant; the
+        # Laplace denominator (one barren evaluation) regularizes the ratio.
+        if diff_stats is not None:
+            n_diff_eval, n_can_eval, d_diff, d_can = diff_stats
+            if d_diff + d_can > 0.0:
+                r_diff = d_diff / (n_diff_eval + 1.0)
+                r_can = d_can / (n_can_eval + 1.0)
+                target_p = r_diff / (r_diff + r_can)
+                self.p_diff = float(np.clip(
+                    (1.0 - self.c_chart) * self.p_diff + self.c_chart * target_p,
+                    0.05, 0.95
+                ))
             
         self.memory_ptr = self.ptr_can
 

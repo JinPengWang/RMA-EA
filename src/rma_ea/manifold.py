@@ -101,34 +101,52 @@ class RiemannianMetricFlow:
         self.U = np.eye(dim, dtype=np.float64)
         self.eig_vals = np.ones(dim, dtype=np.float64)
         self.iteration = 0
+
+    def reset(self) -> None:
+        """Renew the chart: reset the cometric tensor to the isotropic metric.
+
+        Invoked when the current chart is exhausted (prolonged stagnation), so
+        that subsequent updates restart with the Robbins-Monro warm-up.
+        """
+        self.C = np.eye(self.dim, dtype=np.float64)
+        self.U = np.eye(self.dim, dtype=np.float64)
+        self.eig_vals = np.ones(self.dim, dtype=np.float64)
+        self.iteration = 0
         
-    def update(self, elite_samples: np.ndarray, weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def update(self, elite_samples: np.ndarray, weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
         """Update Riemannian metric flow with newly observed elite individuals.
-        
+
         Args:
             elite_samples: (mu, D) matrix of elite decision vectors.
             weights: (mu,) normalized ranking weights (sum(w) = 1).
-            
+
         Returns:
             U: (D, D) orthonormal Riemannian tangent basis.
-            eig_vals: (D,) sorted eigenvalues of cometric tensor.
+            eig_vals: (D,) sorted eigenvalues of the cometric tensor.
+            sigma_pop: current elite spread sqrt(Tr(C_emp)/D), the physical scale
+                of the population for scale-referenced geodesic diffusion.
         """
         self.iteration += 1
         mu, D = elite_samples.shape
         w_sum = np.sum(weights)
         norm_w = weights / w_sum if w_sum > 0 else np.ones(mu) / mu
-        
+
         # Weighted mean and empirical covariance
         mean = np.sum(elite_samples * norm_w[:, np.newaxis], axis=0)
         diff = elite_samples - mean
         C_emp = (diff.T * norm_w) @ diff
-        
-        # Scale-invariant normalization
+
+        # Scale-invariant normalization; retain the physical scale sigma_pop
         tr_mean = np.trace(C_emp) / max(D, 1)
+        sigma_pop = float(np.sqrt(max(tr_mean, 1e-24)))
         C_norm = C_emp / (tr_mean + 1e-12) if tr_mean > 1e-12 else np.eye(D)
-        
+
         # Parameter-free Bayesian Riemannian shrinkage towards isotropic metric I
-        # rho = D / (mu + D) prevents Marchenko-Pastur rank-deficiency when mu < D
+        # rho = D / (mu + D) prevents Marchenko-Pastur rank-deficiency when mu < D.
+        # The full-rank floor is not only estimation robustness: it keeps the
+        # geodesic diffusion rank-complete in ALL D directions, which Round-3
+        # ablation showed is the exploration signal itself (confining diffusion
+        # to the raw elite subspace collapses multimodal escape).
         rho = float(D) / float(mu + D)
         C_shrunk = (1.0 - rho) * C_norm + rho * np.eye(D)
         
@@ -142,8 +160,8 @@ class RiemannianMetricFlow:
         sort_idx = np.argsort(vals)[::-1]
         self.eig_vals = np.maximum(vals[sort_idx], 1e-12)
         self.U = vecs[:, sort_idx]
-        
-        return self.U, self.eig_vals
+
+        return self.U, self.eig_vals, sigma_pop
 
 
 def low_rank_covariance_decompose(

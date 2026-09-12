@@ -113,13 +113,19 @@ def test_riemannian_metric_flow():
     elites = rng.standard_normal((10, dim)) * np.linspace(1, 10, dim)
     weights = np.ones(10) / 10.0
     
-    U, vals = flow.update(elites, weights)
-    
+    U, vals, sigma_pop = flow.update(elites, weights)
+
     assert U.shape == (dim, dim)
     assert vals.shape == (dim,)
     assert np.all(vals > 0)
+    assert sigma_pop > 0
     # Check orthogonality of tangent frame U: U^T U = I
     assert np.allclose(U.T @ U, np.eye(dim), atol=1e-8)
     # Check exact symmetry of cometric C: C = C^T
     assert np.allclose(flow.C, flow.C.T, atol=1e-8)
+
+    # Chart reset returns the flow to the isotropic metric
+    flow.reset()
+    assert np.allclose(flow.C, np.eye(dim))
+    assert flow.iteration == 0
 

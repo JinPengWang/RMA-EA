@@ -7,3 +7,18 @@ __pycache__/
 *.blg
 *.out
 
+# Python environments and build artefacts
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# WorkBuddy internal workspace data (session logs, memory) -- never publish
+.workbuddy/
+
+# In-submission manuscript (IEEE TEVC under review) -- not for public release
+paper/
+
+# Historical result snapshots (~20 MB); current results are retained
+*_backup.json
