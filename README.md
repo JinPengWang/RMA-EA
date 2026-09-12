@@ -73,10 +73,26 @@ Let $C_t = G_t^{-1}$ denote the online cometric estimated from the elite sample 
 
 ## Quickstart
 
-### Installation
+### Development setup (recommended)
+
+The repository ships with **no global installs**. Everything lives in a project-local `.venv/` so your base Python is never touched.
+
 ```bash
-pip install -e .
+# Create the venv from any Python 3.10+ (the in-tree .venv/ is git-ignored).
+python -m venv .venv
+
+# Activate it.  Windows PowerShell:
+.venv\Scripts\Activate.ps1
+# Windows cmd / Git Bash:
+source .venv/Scripts/activate
+# macOS / Linux:
+source .venv/bin/activate
+
+# Install the project in editable mode together with the runtime + dev deps.
+pip install -e ".[dev]"
 ```
+
+The `-e` flag means editing any file under `src/` is picked up immediately; no rebuild step is required.
 
 ### Run Unit Tests
 ```bash
